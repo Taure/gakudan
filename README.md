@@ -50,6 +50,35 @@ rebar3 as example shell
 2> planner_coder:run().
 ```
 
+## Evals
+
+`gakudan_eval:run/1` takes a case spec (config + scripted LLM responses +
+expectations) and returns a structured pass/fail report. Stub-driven, zero
+API cost, deterministic, drop-in for CT or eunit.
+
+```erlang
+ok = gakudan_eval:assert_passed(gakudan_eval:run(#{
+    config => #{
+        agents => [planner_mod, coder_mod],
+        router => {gakudan_router_handoff, #{start => planner}},
+        max_turns => 4
+    },
+    script => [
+        {text, ~"Plan: ... @coder please continue."},
+        {text, ~"acknowledged."}
+    ],
+    input => ~"Build me a TCP echo server",
+    expect => [
+        {outcome, idle},
+        {min_turns, 2},
+        {agent_turn_contains, planner, ~"Plan"},
+        {agent_turn_contains, coder, ~"acknowledged"}
+    ]
+})).
+```
+
+The matcher vocabulary is documented in [`docs/adr/0002-eval-harness.md`](docs/adr/0002-eval-harness.md).
+
 ## Observability
 
 `gakudan` emits `:telemetry` events at every run, turn, LLM request, tool
