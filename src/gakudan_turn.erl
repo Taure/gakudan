@@ -1,7 +1,7 @@
 -module(gakudan_turn).
 -moduledoc false.
 
--export([run/7]).
+-export([run/6]).
 
 -define(MAX_TOOL_ITERATIONS, 10).
 
@@ -9,12 +9,11 @@
     gakudan:run_id(),
     gakudan_agent:id(),
     module(),
-    map(),
     module(),
     map(),
     pid()
 ) -> ok.
-run(RunId, AgentId, AgentMod, _AgentOpts, LlmMod, LlmOpts, Blackboard) ->
+run(RunId, AgentId, AgentMod, LlmMod, LlmOpts, Blackboard) ->
     System = AgentMod:system_prompt(),
     Tools = [T:spec() || T <- AgentMod:tools()],
     Model = AgentMod:model(),

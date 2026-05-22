@@ -199,7 +199,7 @@ start_turn(AgentId, Data) ->
         blackboard = BB,
         turn = T
     } = Data,
-    {AgentMod, AgentOpts} = maps:get(AgentId, Agents),
+    {AgentMod, _AgentOpts} = maps:get(AgentId, Agents),
     Self = self(),
     Ref = make_ref(),
     TurnNumber = T + 1,
@@ -207,7 +207,7 @@ start_turn(AgentId, Data) ->
     emit_turn_start(RunId, AgentId, TurnNumber),
     {Pid, _} = spawn_monitor(fun() ->
         try
-            ok = gakudan_turn:run(RunId, AgentId, AgentMod, AgentOpts, LMod, LOpts, BB),
+            ok = gakudan_turn:run(RunId, AgentId, AgentMod, LMod, LOpts, BB),
             Self ! {turn_complete, Ref, Data#data.router_state}
         catch
             Class:Reason:_St ->
