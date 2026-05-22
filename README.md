@@ -50,6 +50,25 @@ rebar3 as example shell
 2> planner_coder:run().
 ```
 
+## Observability
+
+`gakudan` emits `:telemetry` events at every run, turn, LLM request, tool
+call, and router decision boundary. `[gakudan, llm, request, stop]` carries
+`tokens_in` and `tokens_out`, so per-team cost telemetry comes for free.
+
+```erlang
+telemetry:attach(my_handler, [gakudan, llm, request, stop], fun(_, M, Meta, _) ->
+    io:format("~p used ~p in / ~p out tokens~n",
+              [maps:get(agent_id, Meta), maps:get(tokens_in, M), maps:get(tokens_out, M)])
+end, undefined).
+```
+
+The full event surface is documented in [`docs/adr/0001-telemetry-events.md`](docs/adr/0001-telemetry-events.md)
+and is part of the stable public API from v0.1 onward.
+
+A companion `gakudan_metrics` library (Prometheus + Grafana dashboard) is
+planned.
+
 ## Status
 
 v0.1 - single-node only. No multi-node distribution, no built-in dashboard.

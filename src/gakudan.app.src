@@ -3,7 +3,7 @@
     {vsn, "git"},
     {registered, [gakudan_sup, gakudan_runs_sup]},
     {mod, {gakudan_app, []}},
-    {applications, [kernel, stdlib, crypto, inets, ssl]},
+    {applications, [kernel, stdlib, crypto, inets, ssl, telemetry]},
     {env, []},
     {modules, []},
     {licenses, ["MIT"]},
