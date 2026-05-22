@@ -1,0 +1,11 @@
+{application, gakudan, [
+    {description, "Multi-agent collaboration primitives for the BEAM"},
+    {vsn, "git"},
+    {registered, [gakudan_sup, gakudan_runs_sup]},
+    {mod, {gakudan_app, []}},
+    {applications, [kernel, stdlib, crypto, inets, ssl]},
+    {env, []},
+    {modules, []},
+    {licenses, ["MIT"]},
+    {links, [{"GitHub", "https://github.com/Taure/gakudan"}]}
+]}.
