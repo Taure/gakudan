@@ -65,10 +65,19 @@ parse_response(Body) ->
     Content = maps:get(~"content", Decoded, []),
     Stop = maps:get(~"stop_reason", Decoded, ~"end_turn"),
     Blocks = [parse_block(B) || B <- Content],
-    {ok, #{
+    Base = #{
         stop_reason => binary_to_atom(Stop),
         content => Blocks
-    }}.
+    },
+    case maps:get(~"usage", Decoded, undefined) of
+        undefined -> {ok, Base};
+        Usage -> {ok, Base#{usage => parse_usage(Usage)}}
+    end.
+
+parse_usage(#{~"input_tokens" := In, ~"output_tokens" := Out}) ->
+    #{input_tokens => In, output_tokens => Out};
+parse_usage(_) ->
+    #{input_tokens => 0, output_tokens => 0}.
 
 parse_block(#{~"type" := ~"text", ~"text" := T}) ->
     #{type => text, text => T};

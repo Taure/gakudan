@@ -9,16 +9,26 @@
 -record(data, {
     run_id :: gakudan:run_id(),
     run_sup :: pid(),
-    blackboard :: pid(),
+    blackboard :: undefined | pid(),
     agents :: #{atom() => {module(), map()}},
+    agent_ids :: [atom()],
     router_mod :: module(),
     router_state :: term(),
     llm_mod :: module(),
     llm_opts :: map(),
     max_turns :: pos_integer(),
     turn = 0 :: non_neg_integer(),
-    turn_worker :: undefined | {pid(), reference()},
-    awaiters = [] :: [{pid(), reference()}]
+    turn_worker ::
+        undefined
+        | #{
+            pid := pid(),
+            ref := reference(),
+            agent_id := atom(),
+            turn := pos_integer(),
+            start_time := integer()
+        },
+    awaiters = [] :: [{pid(), reference()}],
+    start_time :: integer()
 }).
 
 start_link(RunSup, Config) ->
@@ -59,11 +69,13 @@ init({RunSup, Config}) ->
         run_sup = RunSup,
         blackboard = undefined,
         agents = Agents,
+        agent_ids = AgentIds,
         router_mod = RMod,
         router_state = RouterState,
         llm_mod = LMod,
         llm_opts = LOpts,
-        max_turns = MaxTurns
+        max_turns = MaxTurns,
+        start_time = erlang:monotonic_time()
     },
     {ok, initialising, Data, [{next_event, internal, finish_init}]}.
 
@@ -72,6 +84,7 @@ handle_event(enter, _Old, initialising, _Data) ->
 handle_event(internal, finish_init, initialising, Data) ->
     Blackboard = find_child(Data#data.run_sup, blackboard),
     ok = gakudan_registry:register(Data#data.run_id, Data#data.run_sup, self(), Blackboard),
+    emit_run_start(Data),
     {next_state, idle, Data#data{blackboard = Blackboard}};
 handle_event(enter, _Old, idle, Data) ->
     notify_awaiters(Data#data.awaiters, Data#data.blackboard),
@@ -85,8 +98,12 @@ handle_event(cast, {user_message, Msg}, running, Data) ->
     {ok, _} = gakudan_blackboard:append(Data#data.blackboard, user, Msg),
     keep_state_and_data;
 handle_event(
-    info, {turn_complete, Ref, RouterState}, running, #data{turn_worker = {_, Ref}} = Data
+    info,
+    {turn_complete, Ref, RouterState},
+    running,
+    #data{turn_worker = #{ref := Ref} = TW} = Data
 ) ->
+    emit_turn_stop(Data, TW, ok, undefined),
     Data1 = Data#data{
         turn_worker = undefined, router_state = RouterState, turn = Data#data.turn + 1
     },
@@ -94,7 +111,10 @@ handle_event(
         true -> dispatch_next_turn(Data1);
         false -> {next_state, idle, Data1}
     end;
-handle_event(info, {turn_failed, Ref, Reason}, running, #data{turn_worker = {_, Ref}} = Data) ->
+handle_event(
+    info, {turn_failed, Ref, Reason}, running, #data{turn_worker = #{ref := Ref} = TW} = Data
+) ->
+    emit_turn_stop(Data, TW, failed, Reason),
     {ok, _} = gakudan_blackboard:append(
         Data#data.blackboard,
         system,
@@ -102,10 +122,14 @@ handle_event(info, {turn_failed, Ref, Reason}, running, #data{turn_worker = {_, 
     ),
     {next_state, idle, Data#data{turn_worker = undefined}};
 handle_event(
-    info, {'DOWN', Ref, process, _, Reason}, running, #data{turn_worker = {_, Ref}} = Data
+    info,
+    {'DOWN', Ref, process, _, Reason},
+    running,
+    #data{turn_worker = #{ref := Ref} = TW} = Data
 ) when
     Reason =/= normal
 ->
+    emit_turn_stop(Data, TW, failed, Reason),
     {ok, _} = gakudan_blackboard:append(
         Data#data.blackboard,
         system,
@@ -131,35 +155,73 @@ handle_event(info, {timeout, TRef, {await_timeout, From}}, _State, Data) ->
 handle_event(_Type, _Event, _State, _Data) ->
     keep_state_and_data.
 
-terminate(_Reason, _State, Data) ->
+terminate(Reason, _State, Data) ->
+    emit_run_stop(Data, Reason),
     gakudan_registry:unregister(Data#data.run_id),
     ok.
 
 dispatch_next_turn(Data) ->
-    #data{router_mod = RMod, router_state = RState, blackboard = BB} = Data,
+    #data{
+        run_id = RunId,
+        router_mod = RMod,
+        router_state = RState,
+        blackboard = BB
+    } = Data,
     Entries = gakudan_blackboard:entries(BB),
-    case RMod:next(RState, Entries) of
+    case decide_with_telemetry(RunId, RMod, RState, Entries) of
         {next, AgentId, RState1} ->
             start_turn(AgentId, Data#data{router_state = RState1});
         {done, RState1} ->
             {next_state, idle, Data#data{router_state = RState1}}
     end.
 
+decide_with_telemetry(RunId, RMod, RState, Entries) ->
+    StartMeta = #{run_id => RunId, router => RMod},
+    telemetry:span(
+        [gakudan, router, decide],
+        StartMeta,
+        fun() ->
+            case RMod:next(RState, Entries) of
+                {next, AgentId, _RState1} = Result ->
+                    {Result, StartMeta#{decision => {next, AgentId}}};
+                {done, _RState1} = Result ->
+                    {Result, StartMeta#{decision => done}}
+            end
+        end
+    ).
+
 start_turn(AgentId, Data) ->
-    #data{agents = Agents, llm_mod = LMod, llm_opts = LOpts, blackboard = BB} = Data,
-    {AgentMod, AgentOpts} = maps:get(AgentId, Agents),
+    #data{
+        run_id = RunId,
+        agents = Agents,
+        llm_mod = LMod,
+        llm_opts = LOpts,
+        blackboard = BB,
+        turn = T
+    } = Data,
+    {AgentMod, _AgentOpts} = maps:get(AgentId, Agents),
     Self = self(),
     Ref = make_ref(),
+    TurnNumber = T + 1,
+    StartTime = erlang:monotonic_time(),
+    emit_turn_start(RunId, AgentId, TurnNumber),
     {Pid, _} = spawn_monitor(fun() ->
         try
-            ok = gakudan_turn:run(AgentId, AgentMod, AgentOpts, LMod, LOpts, BB),
+            ok = gakudan_turn:run(RunId, AgentId, AgentMod, LMod, LOpts, BB),
             Self ! {turn_complete, Ref, Data#data.router_state}
         catch
             Class:Reason:_St ->
                 Self ! {turn_failed, Ref, {Class, Reason}}
         end
     end),
-    {next_state, running, Data#data{turn_worker = {Pid, Ref}}}.
+    TW = #{
+        pid => Pid,
+        ref => Ref,
+        agent_id => AgentId,
+        turn => TurnNumber,
+        start_time => StartTime
+    },
+    {next_state, running, Data#data{turn_worker = TW}}.
 
 should_continue(#data{turn = T, max_turns = M}) when T >= M -> false;
 should_continue(_) -> true.
@@ -193,3 +255,42 @@ notify_awaiters(Awaiters, BB) ->
         end,
         Awaiters
     ).
+
+emit_run_start(Data) ->
+    telemetry:execute(
+        [gakudan, run, start],
+        #{system_time => erlang:system_time()},
+        #{
+            run_id => Data#data.run_id,
+            agents => Data#data.agent_ids,
+            router => Data#data.router_mod,
+            llm_backend => Data#data.llm_mod,
+            max_turns => Data#data.max_turns
+        }
+    ).
+
+emit_run_stop(Data, Reason) ->
+    Duration = erlang:monotonic_time() - Data#data.start_time,
+    telemetry:execute(
+        [gakudan, run, stop],
+        #{duration => Duration, turns => Data#data.turn},
+        #{run_id => Data#data.run_id, reason => Reason}
+    ).
+
+emit_turn_start(RunId, AgentId, Turn) ->
+    telemetry:execute(
+        [gakudan, turn, start],
+        #{system_time => erlang:system_time()},
+        #{run_id => RunId, agent_id => AgentId, turn => Turn}
+    ).
+
+emit_turn_stop(Data, TW, Outcome, Reason) ->
+    #{agent_id := AgentId, turn := Turn, start_time := StartTime} = TW,
+    Duration = erlang:monotonic_time() - StartTime,
+    BaseMeta = #{run_id => Data#data.run_id, agent_id => AgentId, turn => Turn, outcome => Outcome},
+    Meta =
+        case Outcome of
+            ok -> BaseMeta;
+            failed -> BaseMeta#{reason => Reason}
+        end,
+    telemetry:execute([gakudan, turn, stop], #{duration => Duration}, Meta).

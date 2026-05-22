@@ -6,38 +6,39 @@
 -define(MAX_TOOL_ITERATIONS, 10).
 
 -spec run(
+    gakudan:run_id(),
     gakudan_agent:id(),
     module(),
-    map(),
     module(),
     map(),
     pid()
 ) -> ok.
-run(AgentId, AgentMod, _AgentOpts, LlmMod, LlmOpts, Blackboard) ->
+run(RunId, AgentId, AgentMod, LlmMod, LlmOpts, Blackboard) ->
     System = AgentMod:system_prompt(),
     Tools = [T:spec() || T <- AgentMod:tools()],
     Model = AgentMod:model(),
     Transcript = gakudan_blackboard:entries(Blackboard),
     Messages = transcript_to_messages(Transcript, AgentId),
-    loop(AgentId, AgentMod, System, Tools, Model, LlmMod, LlmOpts, Blackboard, Messages, 0).
+    loop(RunId, AgentId, AgentMod, System, Tools, Model, LlmMod, LlmOpts, Blackboard, Messages, 0).
 
-loop(_AgentId, _AgentMod, _Sys, _Tools, _Model, _LMod, _LOpts, _BB, _Msgs, N) when
+loop(_RunId, _AgentId, _AgentMod, _Sys, _Tools, _Model, _LMod, _LOpts, _BB, _Msgs, N) when
     N >= ?MAX_TOOL_ITERATIONS
 ->
     ok;
-loop(AgentId, AgentMod, Sys, Tools, Model, LMod, LOpts, BB, Msgs, N) ->
+loop(RunId, AgentId, AgentMod, Sys, Tools, Model, LMod, LOpts, BB, Msgs, N) ->
     Req = #{model => Model, system => Sys, tools => Tools, messages => Msgs},
-    case LMod:complete(Req, LOpts) of
+    case complete_with_telemetry(RunId, AgentId, LMod, Model, Req, LOpts) of
         {ok, #{stop_reason := end_turn, content := Content}} ->
             Text = collect_text(Content),
             {ok, _} = gakudan_blackboard:append(BB, {agent, AgentId}, Text),
             ok;
         {ok, #{stop_reason := tool_use, content := Content}} ->
             ToolUses = [B || #{type := tool_use} = B <- Content],
-            ToolResults = run_tools(AgentMod:tools(), ToolUses),
+            ToolResults = run_tools(RunId, AgentId, AgentMod:tools(), ToolUses),
             AssistantTurn = #{role => assistant, content => Content},
             UserTurn = #{role => user, content => ToolResults},
             loop(
+                RunId,
                 AgentId,
                 AgentMod,
                 Sys,
@@ -52,6 +53,27 @@ loop(AgentId, AgentMod, Sys, Tools, Model, LMod, LOpts, BB, Msgs, N) ->
         {error, Reason} ->
             error({llm_error, Reason})
     end.
+
+complete_with_telemetry(RunId, AgentId, LMod, Model, Req, LOpts) ->
+    StartMeta = #{run_id => RunId, agent_id => AgentId, backend => LMod, model => Model},
+    telemetry:span(
+        [gakudan, llm, request],
+        StartMeta,
+        fun() ->
+            case LMod:complete(Req, LOpts) of
+                {ok, Resp} = Ok ->
+                    Usage = maps:get(usage, Resp, #{input_tokens => 0, output_tokens => 0}),
+                    Measurements = #{
+                        tokens_in => maps:get(input_tokens, Usage, 0),
+                        tokens_out => maps:get(output_tokens, Usage, 0)
+                    },
+                    {Ok, Measurements, StartMeta#{outcome => ok}};
+                {error, Reason} = Err ->
+                    Measurements = #{tokens_in => 0, tokens_out => 0},
+                    {Err, Measurements, StartMeta#{outcome => error, reason => Reason}}
+            end
+        end
+    ).
 
 transcript_to_messages(Entries, Self) ->
     %% Map blackboard log into Anthropic-style role/content messages.
@@ -88,13 +110,13 @@ collect_text(Content) ->
     Texts = [T || #{type := text, text := T} <- Content],
     iolist_to_binary(lists:join(~"\n", Texts)).
 
-run_tools(ToolMods, ToolUses) ->
+run_tools(RunId, AgentId, ToolMods, ToolUses) ->
     NameMap = maps:from_list([{maps:get(name, M:spec()), M} || M <- ToolMods]),
     lists:map(
         fun(#{id := Id, name := Name, input := Input}) ->
             case maps:find(Name, NameMap) of
                 {ok, Mod} ->
-                    case safe_run_tool(Mod, Input) of
+                    case run_tool_with_telemetry(RunId, AgentId, Name, Mod, Input) of
                         {ok, Output} ->
                             #{
                                 type => tool_result,
@@ -119,6 +141,19 @@ run_tools(ToolMods, ToolUses) ->
             end
         end,
         ToolUses
+    ).
+
+run_tool_with_telemetry(RunId, AgentId, Name, Mod, Input) ->
+    StartMeta = #{run_id => RunId, agent_id => AgentId, tool => Name},
+    telemetry:span(
+        [gakudan, tool, run],
+        StartMeta,
+        fun() ->
+            case safe_run_tool(Mod, Input) of
+                {ok, _} = Ok -> {Ok, StartMeta#{outcome => ok}};
+                {error, Reason} = Err -> {Err, StartMeta#{outcome => error, reason => Reason}}
+            end
+        end
     ).
 
 safe_run_tool(Mod, Input) ->

@@ -85,6 +85,24 @@ Self-cleanup happens via DOWN monitors when the run_sup dies.
    back to `idle`. If max_turns is hit, also goes idle.
 7. `gakudan:stop/1` terminates the run_sup; the registry cleans up.
 
+## Telemetry
+
+Every interesting boundary in a run is wrapped in a `:telemetry` event:
+
+- `[gakudan, run, start | stop]` - one pair per run, with `turns` count on stop.
+- `[gakudan, turn, start | stop]` - one pair per agent turn, with `outcome`
+  (`ok | failed`) and `duration` on stop.
+- `[gakudan, llm, request, *]` - span around each LLM call, with `tokens_in`
+  and `tokens_out` in stop measurements.
+- `[gakudan, tool, run, *]` - span around each tool dispatch.
+- `[gakudan, router, decide, *]` - span around each router decision, with
+  `decision` (`{next, AgentId} | done`) on stop.
+
+These events are stable public API from v0.1 onward. See
+[ADR 0001](adr/0001-telemetry-events.md) for the full schema. Downstream
+metric exporters, audit pipelines, and eval harnesses subscribe to these
+events without coupling to gakudan internals.
+
 ## What this library is not
 
 - Not a workflow engine. There is no DAG, no persistence, no retry on
