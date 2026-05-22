@@ -1,5 +1,9 @@
 # gakudan
 
+[![CI](https://github.com/Taure/gakudan/actions/workflows/ci.yml/badge.svg)](https://github.com/Taure/gakudan/actions/workflows/ci.yml)
+[![License](https://img.shields.io/github/license/Taure/gakudan)](LICENSE)
+[![Erlang](https://img.shields.io/badge/erlang-28%2B-blue)](.tool-versions)
+
 Multi-agent collaboration primitives for the BEAM.
 
 `gakudan` is a small OTP library for running collaborations between specialised
@@ -95,8 +99,12 @@ end, undefined).
 The full event surface is documented in [`docs/adr/0001-telemetry-events.md`](docs/adr/0001-telemetry-events.md)
 and is part of the stable public API from v0.1 onward.
 
-A companion `gakudan_metrics` library (Prometheus + Grafana dashboard) is
-planned.
+## Companion libraries
+
+| Library | What it adds |
+| --- | --- |
+| [`gakudan_metrics`](https://github.com/Taure/gakudan_metrics) | Prometheus exporter + starter Grafana dashboard. |
+| `gakudan_liveboard` (planned) | Real-time human-readable view of runs, via Arizona. |
 
 ## Status
 
