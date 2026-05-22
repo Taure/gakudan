@@ -85,6 +85,14 @@ Self-cleanup happens via DOWN monitors when the run_sup dies.
    back to `idle`. If max_turns is hit, also goes idle.
 7. `gakudan:stop/1` terminates the run_sup; the registry cleans up.
 
+## Evals
+
+`gakudan_eval` runs a single agent collaboration against `gakudan_llm_stub`
+with a scripted response queue, collects the blackboard transcript and the
+telemetry event stream, and runs declarative expectations over both. See
+[ADR 0002](adr/0002-eval-harness.md) for the case format and the matcher
+vocabulary. Stub-driven so it is deterministic, offline, and free.
+
 ## Telemetry
 
 Every interesting boundary in a run is wrapped in a `:telemetry` event:
