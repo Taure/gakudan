@@ -31,28 +31,29 @@ ok = gakudan:send(RunId, ~"Write me a TCP echo server in Erlang."),
 | Tool | `gakudan_tool` | bring your own |
 | LLM backend | `gakudan_llm` | `anthropic`, `stub` |
 
-## Try it (offline, no API key)
+## Examples
+
+| Example | What it shows |
+| --- | --- |
+| [`planner_coder`](examples/planner_coder) | Two-agent handoff with a tool. Planner breaks the task into steps and hands off to a coder via `@coder`; the coder writes the snippet to disk. |
+| [`debate`](examples/debate) | Three agents and a custom router. Proponent argues FOR, opponent argues AGAINST, synthesiser summarises and recommends. Tool-free; demonstrates writing your own `gakudan_router`. |
+
+Both examples ship a `run_stub/0` for offline use, a `run/0,1` against the
+real Anthropic API, and (for `debate`) an `eval_stub/0` that drives
+`gakudan_eval` end-to-end.
 
 ```bash
 git clone https://github.com/Taure/gakudan.git
 cd gakudan
 rebar3 as example shell
 1> application:ensure_all_started(gakudan).
-2> planner_coder:run_stub().
+2> planner_coder:run_stub().     %% offline
+3> debate:run_stub().            %% offline
+4> debate:eval_stub().           %% prints the eval report
 ```
 
-You'll see a planner agent break the task into steps, hand off to a coder
-agent (via `@coder` token), which uses a `write_snippet` tool to drop the code
-in `/tmp/gakudan_snippets/`.
-
-## Try it (real Anthropic)
-
-```bash
-export ANTHROPIC_API_KEY=sk-ant-...
-rebar3 as example shell
-1> application:ensure_all_started(gakudan).
-2> planner_coder:run().
-```
+Set `ANTHROPIC_API_KEY` and call `planner_coder:run/0` or
+`debate:run/1` to drive them against the real model.
 
 ## Evals
 

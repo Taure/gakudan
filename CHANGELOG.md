@@ -7,6 +7,14 @@ and gakudan uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `examples/debate` - three-agent decision-pressure-test example: proponent
+  argues FOR, opponent argues AGAINST, synthesiser summarises and
+  recommends. Includes a custom `debate_router` (cycles debaters for N
+  rounds, then forces one synthesiser turn) and a `debate:eval_stub/0`
+  case that drives `gakudan_eval` end-to-end.
+
 ## [0.1.0] - 2026-05-22
 
 ### Added
