@@ -7,6 +7,19 @@ and gakudan uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `gakudan_llm_anthropic` now marks the system prompt and tool definitions
+  with `cache_control: {type: ephemeral}` so Anthropic caches them across
+  calls within the 5-minute window. For multi-turn agent runs, this drops
+  the system + tools portion of every call after the first to ~10% of the
+  uncached input-token cost. The hint is silently ignored below
+  model-specific minimum thresholds (1024 tokens for Sonnet, 2048 for
+  Haiku), so it is safe for short prompts.
+- `gakudan_llm:usage()` type gains optional `cache_creation_input_tokens`
+  and `cache_read_input_tokens` fields. The Anthropic backend now
+  forwards these when present in the API response.
+
 ## [0.1.1] - 2026-05-23
 
 ### Added

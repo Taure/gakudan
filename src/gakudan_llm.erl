@@ -17,7 +17,9 @@ for backends that omit usage.
 
 -type usage() :: #{
     input_tokens := non_neg_integer(),
-    output_tokens := non_neg_integer()
+    output_tokens := non_neg_integer(),
+    cache_creation_input_tokens => non_neg_integer(),
+    cache_read_input_tokens => non_neg_integer()
 }.
 
 -type request() :: #{

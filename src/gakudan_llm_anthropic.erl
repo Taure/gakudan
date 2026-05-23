@@ -5,11 +5,28 @@ Anthropic Messages API adapter.
 Reads the API key from `Opts` (`api_key => ~"sk-ant-..."`) or, if absent, from
 the `ANTHROPIC_API_KEY` env var. Defaults to model `claude-sonnet-4-6`,
 overridable per-request via the agent's `model/0` callback.
+
+## Prompt caching
+
+The system prompt and tool definitions are automatically marked with
+`cache_control: {type: ephemeral}` so Anthropic caches them across calls
+within the same 5-minute window. For an agent that runs several turns
+back-to-back, this drops the cost of the system + tools portion to ~10%
+of the uncached rate on every call after the first.
+
+Anthropic silently ignores the cache hint below model-specific minimum
+token thresholds (1024 for Sonnet, 2048 for Haiku), so the hint is
+harmless for short prompts.
+
+Cache hits and creations are surfaced in the response `usage` map as
+`cache_read_input_tokens` and `cache_creation_input_tokens` (in addition
+to the standard `input_tokens` and `output_tokens`).
 """.
 
 -behaviour(gakudan_llm).
 
 -export([complete/2]).
+-export([build_body/2, parse_response/1, system_with_cache/1, tools_with_cache/1]).
 
 -define(API_URL, "https://api.anthropic.com/v1/messages").
 -define(VERSION, "2023-06-01").
@@ -40,17 +57,37 @@ do_complete(ApiKey, Req, Opts) ->
             {error, Reason}
     end.
 
+-doc "Build the JSON-encodable Anthropic request body from a gakudan request.".
 build_body(#{model := Model, system := Sys, tools := Tools, messages := Msgs}, Opts) ->
     Base = #{
         model => Model,
-        system => Sys,
+        system => system_with_cache(Sys),
         messages => normalise_messages(Msgs),
         max_tokens => maps:get(max_tokens, Opts, ?DEFAULT_MAX_TOKENS)
     },
     case Tools of
         [] -> Base;
-        _ -> Base#{tools => Tools}
+        _ -> Base#{tools => tools_with_cache(Tools)}
     end.
+
+-doc """
+Wrap a non-empty system prompt in a single text block tagged with
+`cache_control: {type: ephemeral}`. An empty binary passes through
+unchanged.
+""".
+system_with_cache(<<>>) ->
+    <<>>;
+system_with_cache(Sys) when is_binary(Sys) ->
+    [#{type => text, text => Sys, cache_control => #{type => ephemeral}}].
+
+-doc """
+Mark the final tool spec with `cache_control: {type: ephemeral}` so the
+whole `tools` array becomes a single cache breakpoint. Empty list
+passes through unchanged.
+""".
+tools_with_cache([]) -> [];
+tools_with_cache([Last]) -> [Last#{cache_control => #{type => ephemeral}}];
+tools_with_cache([H | T]) -> [H | tools_with_cache(T)].
 
 normalise_messages(Msgs) ->
     [normalise_message(M) || M <- Msgs].
@@ -60,6 +97,7 @@ normalise_message(#{role := R, content := C}) when is_binary(C) ->
 normalise_message(#{role := R, content := C}) when is_list(C) ->
     #{role => R, content => C}.
 
+-doc "Decode an Anthropic JSON response into a gakudan response.".
 parse_response(Body) ->
     Decoded = json:decode(Body),
     Content = maps:get(~"content", Decoded, []),
@@ -74,10 +112,19 @@ parse_response(Body) ->
         Usage -> {ok, Base#{usage => parse_usage(Usage)}}
     end.
 
-parse_usage(#{~"input_tokens" := In, ~"output_tokens" := Out}) ->
-    #{input_tokens => In, output_tokens => Out};
-parse_usage(_) ->
-    #{input_tokens => 0, output_tokens => 0}.
+parse_usage(Usage) ->
+    Base = #{
+        input_tokens => maps:get(~"input_tokens", Usage, 0),
+        output_tokens => maps:get(~"output_tokens", Usage, 0)
+    },
+    Base1 = maybe_put(Base, cache_creation_input_tokens, ~"cache_creation_input_tokens", Usage),
+    maybe_put(Base1, cache_read_input_tokens, ~"cache_read_input_tokens", Usage).
+
+maybe_put(Map, OutKey, JsonKey, Source) ->
+    case maps:get(JsonKey, Source, undefined) of
+        undefined -> Map;
+        V -> Map#{OutKey => V}
+    end.
 
 parse_block(#{~"type" := ~"text", ~"text" := T}) ->
     #{type => text, text => T};
