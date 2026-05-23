@@ -7,6 +7,8 @@ and gakudan uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-05-23
+
 ### Added
 
 - `gakudan_llm_gemini` - Google Gemini `generateContent` backend. Reads
@@ -22,6 +24,12 @@ and gakudan uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   recommends. Includes a custom `debate_router` (cycles debaters for N
   rounds, then forces one synthesiser turn) and a `debate:eval_stub/0`
   case that drives `gakudan_eval` end-to-end.
+
+### Changed
+
+- CI pins `Taure/erlang-ci` to `@v2.1.1` (explicit) instead of `@v2.1.0`.
+  Picks up the upstream fix for the dangling audit composite ref that
+  caused the `Audit` job to fail on every PR since v0.1.0.
 
 ## [0.1.0] - 2026-05-22
 
@@ -62,5 +70,6 @@ and gakudan uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Tools dispatch synchronously in-process; wrap behind shigoto or similar
   for long-running tools.
 
-[Unreleased]: https://github.com/Taure/gakudan/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/Taure/gakudan/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/Taure/gakudan/releases/tag/v0.1.1
 [0.1.0]: https://github.com/Taure/gakudan/releases/tag/v0.1.0
