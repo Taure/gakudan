@@ -29,7 +29,7 @@ ok = gakudan:send(RunId, ~"Write me a TCP echo server in Erlang."),
 | Agent | `gakudan_agent` | bring your own |
 | Router | `gakudan_router` | `round_robin`, `handoff`, `manager` |
 | Tool | `gakudan_tool` | bring your own |
-| LLM backend | `gakudan_llm` | `anthropic`, `stub` |
+| LLM backend | `gakudan_llm` | `anthropic`, `gemini`, `stub` |
 
 ## Examples
 

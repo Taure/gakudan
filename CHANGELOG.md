@@ -9,6 +9,14 @@ and gakudan uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `gakudan_llm_gemini` - Google Gemini `generateContent` backend. Reads
+  `GEMINI_API_KEY` from env (or `Opts`), translates the gakudan/Anthropic
+  request/response shape bidirectionally (system prompt, messages,
+  tools, tool_use / tool_result, usage). Synthesises tool-call ids for
+  Gemini `functionCall` parts (Gemini does not issue them); recovers
+  tool names for `functionResponse` parts from the prior `tool_use`
+  blocks in the same conversation. Override `base_url` or `api_version`
+  via `Opts` for proxy / beta-API use.
 - `examples/debate` - three-agent decision-pressure-test example: proponent
   argues FOR, opponent argues AGAINST, synthesiser summarises and
   recommends. Includes a custom `debate_router` (cycles debaters for N
