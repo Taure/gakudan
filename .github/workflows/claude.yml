@@ -56,8 +56,11 @@ jobs:
             discussion, or the reproducer is too vague), post a comment on
             the issue explaining what you'd need to proceed and STOP - do
             not open a PR.
+
+            Never push to `main`. Always work on a new branch.
           claude_args: |
             --max-turns 30
+            --allowedTools "Bash(rebar3 *),Bash(git *),Bash(gh *),Bash(ls *),Bash(cat *),Bash(find *),Bash(grep *),Bash(mkdir *),Bash(echo *)"
 
       - name: Run Claude Code (interactive @claude mention)
         if: github.event_name != 'issues' || github.event.action != 'labeled'
