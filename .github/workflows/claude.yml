@@ -59,8 +59,8 @@ jobs:
 
             Never push to `main`. Always work on a new branch.
           claude_args: |
-            --max-turns 30
-            --allowedTools "Bash(rebar3 *),Bash(git *),Bash(gh *),Bash(ls *),Bash(cat *),Bash(find *),Bash(grep *),Bash(mkdir *),Bash(echo *)"
+            --max-turns 40
+            --allowedTools "Read,Write,Edit,Glob,Grep,Bash(rebar3 *),Bash(git *),Bash(gh *),Bash(ls *),Bash(cat *),Bash(find *),Bash(grep *),Bash(mkdir *),Bash(echo *)"
 
       - name: Run Claude Code (interactive @claude mention)
         if: github.event_name != 'issues' || github.event.action != 'labeled'
