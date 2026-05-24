@@ -78,6 +78,30 @@ Swap in `planner_coder:run_stub()` for a two-agent handoff with a tool call.
 | Tool | `gakudan_tool` | bring your own | JSON schema + `run/1` callback. |
 | LLM backend | `gakudan_llm` | `anthropic`, `gemini`, `stub` | One callback: `complete(req, opts) -> response`. |
 
+## Writing a custom router
+
+A router decides whose turn is next. Implement the `gakudan_router` behaviour
+in your own module and pass it via `router => {your_router, Opts}` in
+`start_run/1`.
+
+```erlang
+-module(my_router).
+-behaviour(gakudan_router).
+-export([init/2, next/2]).
+
+init(Opts, AgentIds) ->
+    {ok, #{queue => AgentIds, opts => Opts}}.
+
+next(#{queue := [Next | Rest]} = State, _Transcript) ->
+    {next, Next, State#{queue := Rest}};
+next(#{queue := []} = State, _Transcript) ->
+    {done, State}.
+```
+
+`next/2` returns `{next, AgentId, NewState}` to schedule another turn, or
+`{done, NewState}` to end the run. See [`debate_router`](examples/debate/src/debate_router.erl)
+for a fuller example (N rounds of debaters + a forced synthesiser turn).
+
 ## Running against a real model
 
 Set `ANTHROPIC_API_KEY` (or `GEMINI_API_KEY`), then:
