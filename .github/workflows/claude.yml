@@ -31,8 +31,36 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Run Claude Code
-        id: claude
+      - name: Run Claude Code (label-triggered auto-fix)
+        if: github.event_name == 'issues' && github.event.action == 'labeled' && github.event.label.name == 'claude-try'
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            Issue #${{ github.event.issue.number }} was just labeled `claude-try`
+            by triagebot. The issue title is: ${{ github.event.issue.title }}.
+
+            Read the issue body and any triage comment, then:
+
+            1. Make a plan for the smallest correct fix.
+            2. Implement it on a new branch named `claude/issue-${{ github.event.issue.number }}-<short-slug>`.
+            3. Run the project's checks: `rebar3 fmt --check`, `rebar3 xref`,
+               `rebar3 dialyzer`, `rebar3 eunit`, `rebar3 ct`. Fix any
+               failures introduced by your change before opening the PR.
+            4. Open a pull request that closes #${{ github.event.issue.number }}.
+               Title format: `<type>(<scope>): <short description>`. Conventional
+               commit types only. The PR body should briefly explain the change,
+               link to the issue, and include a short test plan.
+
+            If the issue is not in fact actionable (e.g. it asks for design
+            discussion, or the reproducer is too vague), post a comment on
+            the issue explaining what you'd need to proceed and STOP - do
+            not open a PR.
+          claude_args: |
+            --max-turns 30
+
+      - name: Run Claude Code (interactive @claude mention)
+        if: github.event_name != 'issues' || github.event.action != 'labeled'
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
