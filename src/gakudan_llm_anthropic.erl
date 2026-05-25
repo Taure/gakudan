@@ -25,8 +25,10 @@ to the standard `input_tokens` and `output_tokens`).
 
 -behaviour(gakudan_llm).
 
--export([complete/2]).
+-export([complete/2, stream_call/3]).
 -export([build_body/2, parse_response/1, system_with_cache/1, tools_with_cache/1]).
+-export([parse_sse/2, apply_anthropic_event/2]).
+-export_type([sse_acc/0, stream_acc/0]).
 
 -define(API_URL, "https://api.anthropic.com/v1/messages").
 -define(VERSION, "2023-06-01").
@@ -149,4 +151,276 @@ ensure_inets() ->
     case ssl:start() of
         ok -> ok;
         {error, {already_started, _}} -> ok
+    end.
+
+%%% Streaming %%%
+
+-type sse_acc() :: binary().
+-type stream_acc() :: #{
+    blocks := #{non_neg_integer() => content_block_acc()},
+    stop_reason := undefined | atom(),
+    usage := map()
+}.
+
+-type content_block_acc() ::
+    #{type := text, text := binary()}
+    | #{type := tool_use, id := binary(), name := binary(), partial_json := binary()}.
+
+-doc "Stream from Anthropic's Messages API. See [ADR 0005](docs/adr/0005-streaming.md).".
+-spec stream_call(gakudan_llm:request(), map(), pid()) ->
+    {ok, gakudan_llm:response()} | {error, term()}.
+stream_call(Req, Opts, Subscriber) ->
+    case api_key(Opts) of
+        undefined -> {error, no_api_key};
+        Key -> do_stream(Key, Req, Opts, Subscriber)
+    end.
+
+do_stream(ApiKey, Req, Opts, Subscriber) ->
+    ok = ensure_inets(),
+    Body = (build_body(Req, Opts))#{stream => true},
+    Headers = [
+        {"x-api-key", binary_to_list(ApiKey)},
+        {"anthropic-version", ?VERSION},
+        {"accept", "text/event-stream"}
+    ],
+    Request = {?API_URL, Headers, "application/json", iolist_to_binary(json:encode(Body))},
+    Timeout = maps:get(timeout, Opts, ?DEFAULT_TIMEOUT),
+    Ref = maps:get(stream_request_id, Opts),
+    Subscriber ! {gakudan_llm_stream, Ref, {start, #{model => maps:get(model, Req)}}},
+    case
+        httpc:request(
+            post,
+            Request,
+            [{timeout, Timeout}],
+            [{sync, false}, {stream, self}, {receiver, self()}, {body_format, binary}]
+        )
+    of
+        {ok, ReqId} ->
+            stream_loop(ReqId, Subscriber, Ref, <<>>, fresh_stream_acc(), Timeout);
+        {error, Reason} ->
+            Subscriber ! {gakudan_llm_stream, Ref, {exception, Reason}},
+            {error, Reason}
+    end.
+
+fresh_stream_acc() ->
+    #{blocks => #{}, stop_reason => undefined, usage => #{input_tokens => 0, output_tokens => 0}}.
+
+stream_loop(ReqId, Subscriber, Ref, Pending, Acc, Timeout) ->
+    receive
+        {http, {ReqId, stream_start, _Headers}} ->
+            stream_loop(ReqId, Subscriber, Ref, Pending, Acc, Timeout);
+        {http, {ReqId, stream, Chunk}} ->
+            {Events, NewPending} = parse_sse(Chunk, Pending),
+            NewAcc = dispatch_events(Events, Subscriber, Ref, Acc),
+            stream_loop(ReqId, Subscriber, Ref, NewPending, NewAcc, Timeout);
+        {http, {ReqId, stream_end, _Headers}} ->
+            Resp = finalise(Acc),
+            Subscriber ! {gakudan_llm_stream, Ref, {message_stop, Resp}},
+            {ok, Resp};
+        {http, {ReqId, {error, Reason}}} ->
+            Subscriber ! {gakudan_llm_stream, Ref, {exception, Reason}},
+            {error, Reason};
+        {http, {ReqId, {{_, Code, _}, _Hdrs, Body}}} when Code >= 400 ->
+            Subscriber ! {gakudan_llm_stream, Ref, {exception, {http_error, Code, Body}}},
+            {error, {http_error, Code, Body}}
+    after Timeout ->
+        _ = httpc:cancel_request(ReqId),
+        Subscriber ! {gakudan_llm_stream, Ref, {exception, timeout}},
+        {error, timeout}
+    end.
+
+-doc """
+Incremental SSE parser. Concatenates `Chunk` onto the accumulator,
+splits complete events on `\\n\\n`, decodes each event's `data:` line as
+JSON, and returns `{[Event], NewAcc}`.
+
+Each `Event` is the decoded JSON map (with `~"type"` key), already
+matching Anthropic's wire format. The trailing fragment that does not
+end in `\\n\\n` stays in `NewAcc` for the next call.
+""".
+-spec parse_sse(binary(), sse_acc()) -> {[map()], sse_acc()}.
+parse_sse(Chunk, Acc) ->
+    Buf = <<Acc/binary, Chunk/binary>>,
+    {Complete, Rest} = split_events(Buf),
+    Events = [decode_event(E) || E <- Complete, has_data(E)],
+    {Events, Rest}.
+
+split_events(Buf) ->
+    split_events(Buf, []).
+
+split_events(Buf, Acc) ->
+    case binary:split(Buf, ~"\n\n") of
+        [Event, Rest] -> split_events(Rest, [Event | Acc]);
+        [_Incomplete] -> {lists:reverse(Acc), Buf}
+    end.
+
+has_data(Event) ->
+    binary:match(Event, ~"data: ") =/= nomatch.
+
+decode_event(Event) ->
+    Lines = binary:split(Event, ~"\n", [global]),
+    case first_data_line(Lines) of
+        {ok, Data} -> json:decode(Data);
+        none -> #{}
+    end.
+
+first_data_line([]) ->
+    none;
+first_data_line([<<"data: ", Rest/binary>> | _]) ->
+    {ok, Rest};
+first_data_line([_ | T]) ->
+    first_data_line(T).
+
+dispatch_events([], _Sub, _Ref, Acc) ->
+    Acc;
+dispatch_events([Event | Rest], Sub, Ref, Acc) ->
+    NewAcc = apply_anthropic_event(Event, Acc),
+    forward(Sub, Ref, Event, NewAcc),
+    dispatch_events(Rest, Sub, Ref, NewAcc).
+
+-doc """
+Apply a decoded Anthropic SSE event to the streaming accumulator.
+Tracks per-index content blocks (text + tool_use), running usage,
+and the final stop_reason.
+""".
+-spec apply_anthropic_event(map(), stream_acc()) -> stream_acc().
+apply_anthropic_event(#{~"type" := ~"message_start", ~"message" := Msg}, Acc) ->
+    UsageUpdate =
+        case maps:get(~"usage", Msg, undefined) of
+            undefined -> maps:get(usage, Acc);
+            U -> apply_usage_update(maps:get(usage, Acc), U)
+        end,
+    Acc#{usage => UsageUpdate};
+apply_anthropic_event(
+    #{~"type" := ~"content_block_start", ~"index" := Idx, ~"content_block" := Block},
+    Acc
+) ->
+    NewBlock =
+        case Block of
+            #{~"type" := ~"text"} ->
+                #{type => text, text => <<>>};
+            #{~"type" := ~"tool_use", ~"id" := Id, ~"name" := Name} ->
+                #{type => tool_use, id => Id, name => Name, partial_json => <<>>}
+        end,
+    Blocks = (maps:get(blocks, Acc))#{Idx => NewBlock},
+    Acc#{blocks => Blocks};
+apply_anthropic_event(
+    #{~"type" := ~"content_block_delta", ~"index" := Idx, ~"delta" := Delta},
+    Acc
+) ->
+    Blocks = maps:get(blocks, Acc),
+    Block = maps:get(Idx, Blocks),
+    Updated = apply_delta(Block, Delta),
+    Acc#{blocks => Blocks#{Idx => Updated}};
+apply_anthropic_event(#{~"type" := ~"content_block_stop"}, Acc) ->
+    Acc;
+apply_anthropic_event(#{~"type" := ~"message_delta"} = E, Acc) ->
+    Acc1 =
+        case maps:get(~"delta", E, #{}) of
+            #{~"stop_reason" := SR} when is_binary(SR) ->
+                Acc#{stop_reason => binary_to_atom(SR)};
+            _ ->
+                Acc
+        end,
+    case maps:get(~"usage", E, undefined) of
+        undefined -> Acc1;
+        U -> Acc1#{usage => apply_usage_update(maps:get(usage, Acc1), U)}
+    end;
+apply_anthropic_event(_Other, Acc) ->
+    Acc.
+
+apply_delta(#{type := text, text := T} = Block, #{~"type" := ~"text_delta", ~"text" := D}) ->
+    Block#{text => <<T/binary, D/binary>>};
+apply_delta(
+    #{type := tool_use, partial_json := P} = Block,
+    #{~"type" := ~"input_json_delta", ~"partial_json" := D}
+) ->
+    Block#{partial_json => <<P/binary, D/binary>>};
+apply_delta(Block, _) ->
+    Block.
+
+forward(Sub, Ref, #{~"type" := ~"content_block_start", ~"index" := Idx}, NewAcc) ->
+    case maps:get(Idx, maps:get(blocks, NewAcc)) of
+        #{type := tool_use, id := Id, name := Name} ->
+            _ = Sub ! {gakudan_llm_stream, Ref, {tool_use_start, #{id => Id, name => Name}}},
+            ok;
+        _ ->
+            ok
+    end;
+forward(Sub, Ref, #{~"type" := ~"content_block_delta", ~"index" := Idx, ~"delta" := Delta}, NewAcc) ->
+    Block = maps:get(Idx, maps:get(blocks, NewAcc)),
+    case {Block, Delta} of
+        {#{type := text}, #{~"type" := ~"text_delta", ~"text" := T}} ->
+            _ = Sub ! {gakudan_llm_stream, Ref, {text_delta, T}},
+            ok;
+        {#{type := tool_use, id := Id}, #{~"type" := ~"input_json_delta", ~"partial_json" := P}} ->
+            _ =
+                Sub !
+                    {gakudan_llm_stream, Ref,
+                        {tool_use_input_delta, #{id => Id, partial_json => P}}},
+            ok;
+        _ ->
+            ok
+    end;
+forward(Sub, Ref, #{~"type" := ~"message_delta"} = E, _NewAcc) ->
+    case maps:get(~"delta", E, #{}) of
+        #{~"stop_reason" := SR} when is_binary(SR) ->
+            _ =
+                Sub !
+                    {gakudan_llm_stream, Ref,
+                        {message_delta, #{stop_reason => binary_to_atom(SR)}}},
+            ok;
+        _ ->
+            ok
+    end;
+forward(_Sub, _Ref, _Other, _NewAcc) ->
+    ok.
+
+apply_usage_update(Existing, Update) ->
+    Pairs = [
+        {input_tokens, ~"input_tokens"},
+        {output_tokens, ~"output_tokens"},
+        {cache_creation_input_tokens, ~"cache_creation_input_tokens"},
+        {cache_read_input_tokens, ~"cache_read_input_tokens"}
+    ],
+    lists:foldl(
+        fun({OutKey, JsonKey}, Acc) ->
+            case maps:get(JsonKey, Update, undefined) of
+                undefined -> Acc;
+                V -> Acc#{OutKey => V}
+            end
+        end,
+        Existing,
+        Pairs
+    ).
+
+finalise(#{blocks := Blocks, stop_reason := SR, usage := Usage}) ->
+    Indices = lists:sort(maps:keys(Blocks)),
+    Content = [block_to_response(maps:get(I, Blocks)) || I <- Indices],
+    Stop =
+        case SR of
+            undefined -> end_turn;
+            S -> S
+        end,
+    #{
+        stop_reason => Stop,
+        content => Content,
+        usage => Usage
+    }.
+
+block_to_response(#{type := text, text := T}) ->
+    #{type => text, text => T};
+block_to_response(#{type := tool_use, id := Id, name := Name, partial_json := P}) ->
+    Input =
+        case P of
+            <<>> -> #{};
+            _ -> safe_json_decode(P)
+        end,
+    #{type => tool_use, id => Id, name => Name, input => Input}.
+
+safe_json_decode(B) ->
+    try
+        json:decode(B)
+    catch
+        _:_ -> #{}
     end.
