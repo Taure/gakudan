@@ -9,6 +9,29 @@ and gakudan uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **MCP client.** New `gakudan_mcp_client` gen_server speaks the
+  Streamable HTTP transport of the Model Context Protocol. One process
+  per remote MCP endpoint; performs the `initialize` handshake on
+  start, caches the server's tool list, exposes `list_tools/1`,
+  `get_tool/2`, `call_tool/3`. Auth supports bearer tokens.
+  `as_tools/1` returns `gakudan_tool:ref()` values ready to splice
+  into an agent's `tools/0`. See
+  [ADR 0006](docs/adr/0006-mcp-client.md).
+- **`gakudan_mcp_tool` adapter.** Single module that wraps any
+  MCP-discovered tool. Agents reference MCP tools as
+  `{gakudan_mcp_tool, #{client => Name, name => ToolName}}`.
+- **`gakudan_tool` extension.** New optional callbacks `spec/1` and
+  `run/2` let tools carry per-instance opts. Agents can now mix
+  module-only tools (`my_tool`) and parameterised tools
+  (`{gakudan_mcp_tool, Opts}`) in the same `tools/0` list. The turn
+  worker resolves both forms uniformly via `gakudan_tool:resolve/1`.
+  Backwards-compatible: existing module-only tools work unchanged.
+
+### Changed
+
+- `gakudan_agent:tool_spec()` widened from `module()` to
+  `gakudan_tool:ref()` (which is `module() | {module(), map()}`).
+
 - **Gemini streaming backend.** `gakudan_llm_gemini:stream_call/3` hits
   `streamGenerateContent?alt=sse`, decodes Gemini's candidate-snapshot
   SSE chunks, and emits `gakudan_llm:stream_event()` to the subscriber.

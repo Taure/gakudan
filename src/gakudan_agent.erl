@@ -10,7 +10,7 @@ prompt, declare tools and a model. The library wires the rest.
 -export_type([id/0, tool_spec/0, model/0]).
 
 -type id() :: atom().
--type tool_spec() :: module().
+-type tool_spec() :: gakudan_tool:ref().
 -type model() :: binary().
 
 -callback id() -> id().
