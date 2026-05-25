@@ -9,6 +9,19 @@ and gakudan uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Gemini streaming backend.** `gakudan_llm_gemini:stream_call/3` hits
+  `streamGenerateContent?alt=sse`, decodes Gemini's candidate-snapshot
+  SSE chunks, and emits `gakudan_llm:stream_event()` to the subscriber.
+  Per-chunk `text` parts accumulate into a single text block per
+  contiguous run; `functionCall` parts flush the current text and
+  emit `tool_use_start` + `tool_use_input_delta`. `finishReason` is
+  mapped to `stop_reason` on the canonical response (`STOP -> end_turn`,
+  `TOOL_CALL -> tool_use`, `MAX_TOKENS -> max_tokens`). Same public
+  testable seam as Anthropic (`fresh_stream_acc/0`,
+  `feed_stream_chunk/4`, `finalise/1`, `apply_gemini_event/2`).
+- **`gakudan_sse:parse/2`** as a shared byte-level SSE primitive used
+  by both backends. `gakudan_llm_anthropic:parse_sse/2` now delegates;
+  the public surface is unchanged.
 - **`gakudan_llm_anthropic:feed_stream_chunk/4`** (plus `fresh_stream_acc/0`
   and `finalise/1`) exposed as the public testable seam for the streaming
   pipeline. Three new CT cases drive a canned SSE byte sequence through
