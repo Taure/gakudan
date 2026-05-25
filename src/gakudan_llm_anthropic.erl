@@ -248,46 +248,12 @@ stream_loop(ReqId, Subscriber, Ref, Pending, Acc, Timeout) ->
     end.
 
 -doc """
-Incremental SSE parser. Concatenates `Chunk` onto the accumulator,
-splits complete events on `\\n\\n`, decodes each event's `data:` line as
-JSON, and returns `{[Event], NewAcc}`.
-
-Each `Event` is the decoded JSON map (with `~"type"` key), already
-matching Anthropic's wire format. The trailing fragment that does not
-end in `\\n\\n` stays in `NewAcc` for the next call.
+Incremental SSE parser. Delegates to `gakudan_sse:parse/2`; kept as a
+re-export for the public surface locked since v0.1 streaming work.
 """.
 -spec parse_sse(binary(), sse_acc()) -> {[map()], sse_acc()}.
 parse_sse(Chunk, Acc) ->
-    Buf = <<Acc/binary, Chunk/binary>>,
-    {Complete, Rest} = split_events(Buf),
-    Events = [decode_event(E) || E <- Complete, has_data(E)],
-    {Events, Rest}.
-
-split_events(Buf) ->
-    split_events(Buf, []).
-
-split_events(Buf, Acc) ->
-    case binary:split(Buf, ~"\n\n") of
-        [Event, Rest] -> split_events(Rest, [Event | Acc]);
-        [_Incomplete] -> {lists:reverse(Acc), Buf}
-    end.
-
-has_data(Event) ->
-    binary:match(Event, ~"data: ") =/= nomatch.
-
-decode_event(Event) ->
-    Lines = binary:split(Event, ~"\n", [global]),
-    case first_data_line(Lines) of
-        {ok, Data} -> json:decode(Data);
-        none -> #{}
-    end.
-
-first_data_line([]) ->
-    none;
-first_data_line([<<"data: ", Rest/binary>> | _]) ->
-    {ok, Rest};
-first_data_line([_ | T]) ->
-    first_data_line(T).
+    gakudan_sse:parse(Chunk, Acc).
 
 dispatch_events([], _Sub, _Ref, Acc) ->
     Acc;
