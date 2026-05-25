@@ -18,7 +18,8 @@
 ) -> ok.
 run(RunId, AgentId, AgentMod, Turn, Checkpointer, LlmMod, LlmOpts, Blackboard, Stream) ->
     System = AgentMod:system_prompt(),
-    Tools = [T:spec() || T <- AgentMod:tools()],
+    ResolvedTools = gakudan_tool:resolve(AgentMod:tools()),
+    Specs = [maps:get(spec, R) || R <- ResolvedTools],
     Model = AgentMod:model(),
     Transcript = gakudan_blackboard:entries(Blackboard),
     Messages = transcript_to_messages(Transcript, AgentId),
@@ -27,7 +28,8 @@ run(RunId, AgentId, AgentMod, Turn, Checkpointer, LlmMod, LlmOpts, Blackboard, S
         agent_id => AgentId,
         agent_mod => AgentMod,
         sys => System,
-        tools => Tools,
+        tools => Specs,
+        resolved_tools => ResolvedTools,
         model => Model,
         turn => Turn,
         checkpointer => Checkpointer,
@@ -43,9 +45,9 @@ loop(_Ctx, _Msgs, N) when N >= ?MAX_TOOL_ITERATIONS ->
 loop(Ctx, Msgs, N) ->
     #{
         agent_id := AgentId,
-        agent_mod := AgentMod,
         sys := Sys,
         tools := Tools,
+        resolved_tools := ResolvedTools,
         model := Model,
         bb := BB
     } = Ctx,
@@ -58,7 +60,7 @@ loop(Ctx, Msgs, N) ->
         {ok, #{stop_reason := tool_use, content := Content}} ->
             ToolUses = [B || #{type := tool_use} = B <- Content],
             #{run_id := RunId} = Ctx,
-            ToolResults = run_tools(RunId, AgentId, AgentMod:tools(), ToolUses),
+            ToolResults = run_tools(RunId, AgentId, ResolvedTools, ToolUses),
             AssistantTurn = #{role => assistant, content => Content},
             UserTurn = #{role => user, content => ToolResults},
             loop(Ctx, Msgs ++ [AssistantTurn, UserTurn], N + 1);
@@ -249,13 +251,16 @@ collect_text(Content) ->
     Texts = [T || #{type := text, text := T} <- Content],
     iolist_to_binary(lists:join(~"\n", Texts)).
 
-run_tools(RunId, AgentId, ToolMods, ToolUses) ->
-    NameMap = maps:from_list([{maps:get(name, M:spec()), M} || M <- ToolMods]),
+run_tools(RunId, AgentId, ResolvedTools, ToolUses) ->
+    NameMap = maps:from_list([
+        {maps:get(name, maps:get(spec, R)), R}
+     || R <- ResolvedTools
+    ]),
     lists:map(
         fun(#{id := Id, name := Name, input := Input}) ->
             case maps:find(Name, NameMap) of
-                {ok, Mod} ->
-                    case run_tool_with_telemetry(RunId, AgentId, Name, Mod, Input) of
+                {ok, #{run := RunFun}} ->
+                    case run_tool_with_telemetry(RunId, AgentId, Name, RunFun, Input) of
                         {ok, Output} ->
                             #{
                                 type => tool_result,
@@ -282,22 +287,22 @@ run_tools(RunId, AgentId, ToolMods, ToolUses) ->
         ToolUses
     ).
 
-run_tool_with_telemetry(RunId, AgentId, Name, Mod, Input) ->
+run_tool_with_telemetry(RunId, AgentId, Name, RunFun, Input) ->
     StartMeta = #{run_id => RunId, agent_id => AgentId, tool => Name},
     telemetry:span(
         [gakudan, tool, run],
         StartMeta,
         fun() ->
-            case safe_run_tool(Mod, Input) of
+            case safe_run_tool(RunFun, Input) of
                 {ok, _} = Ok -> {Ok, StartMeta#{outcome => ok}};
                 {error, Reason} = Err -> {Err, StartMeta#{outcome => error, reason => Reason}}
             end
         end
     ).
 
-safe_run_tool(Mod, Input) ->
+safe_run_tool(RunFun, Input) ->
     try
-        Mod:run(Input)
+        RunFun(Input)
     catch
         Class:Reason -> {error, {Class, Reason}}
     end.
