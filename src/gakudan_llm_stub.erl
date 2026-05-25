@@ -12,7 +12,7 @@ A `response()` is `{text, binary()}` or `{tool_use, Name, Input}` or
 
 -behaviour(gakudan_llm).
 
--export([complete/2]).
+-export([complete/2, stream_call/3]).
 
 complete(_Req, Opts) ->
     Pid = script_owner(Opts),
@@ -52,3 +52,58 @@ next_response(Pid) ->
         {ok, R} -> R;
         empty -> {text, ~""}
     end.
+
+-doc """
+Streaming variant. If the scripted response is `{stream_chunks, [binary()]}`,
+emits one `text_delta` per chunk so tests can assert multi-event behaviour.
+Otherwise emits a single `text_delta` carrying the full text, matching the
+library's synthetic-fallback semantics. Always finishes with `message_stop`.
+""".
+-spec stream_call(gakudan_llm:request(), map(), pid()) ->
+    {ok, gakudan_llm:response()} | {error, term()}.
+stream_call(Req, Opts, Subscriber) ->
+    Ref = maps:get(stream_request_id, Opts),
+    Model = maps:get(model, Req, ~""),
+    Subscriber ! {gakudan_llm_stream, Ref, {start, #{model => Model}}},
+    Pid = script_owner(Opts),
+    Next =
+        case Pid of
+            undefined -> {text, ~""};
+            _ -> next_response(Pid)
+        end,
+    case Next of
+        {stream_chunks, Chunks} when is_list(Chunks) ->
+            lists:foreach(
+                fun(C) when is_binary(C) ->
+                    Subscriber ! {gakudan_llm_stream, Ref, {text_delta, C}}
+                end,
+                Chunks
+            ),
+            Full = iolist_to_binary(Chunks),
+            Resp = render({text, Full}),
+            Subscriber ! {gakudan_llm_stream, Ref, {message_stop, Resp}},
+            {ok, Resp};
+        Other ->
+            Resp = render(Other),
+            forward_synthetic(Subscriber, Ref, Resp),
+            Subscriber ! {gakudan_llm_stream, Ref, {message_stop, Resp}},
+            {ok, Resp}
+    end.
+
+forward_synthetic(Subscriber, Ref, #{content := Content}) ->
+    lists:foreach(
+        fun
+            (#{type := text, text := T}) ->
+                Subscriber ! {gakudan_llm_stream, Ref, {text_delta, T}};
+            (#{type := tool_use, id := Id, name := Name, input := Input}) ->
+                Subscriber !
+                    {gakudan_llm_stream, Ref, {tool_use_start, #{id => Id, name => Name}}},
+                Subscriber !
+                    {gakudan_llm_stream, Ref,
+                        {tool_use_input_delta, #{
+                            id => Id,
+                            partial_json => iolist_to_binary(json:encode(Input))
+                        }}}
+        end,
+        Content
+    ).

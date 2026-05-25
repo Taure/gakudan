@@ -9,32 +9,25 @@ and gakudan uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- **Persistence layer** behind a new `gakudan_checkpointer` behaviour. Runs
-  with a configured checkpointer survive a BEAM restart. Snapshots capture
-  the blackboard, KV scratchpad, router state, and run statem state; step
-  records capture each LLM request / response keyed by a deterministic
-  `step_id` so resume does not re-bill completed steps. Default impl
-  `gakudan_checkpointer_kura` ships in core and works against any
-  `kura` 2.x backend (e.g. `kura_postgres`, `kura_sqlite`). See
-  [ADR 0003](docs/adr/0003-checkpointer-behaviour.md).
-- **`awaiting_human` run state** with `gakudan:interrupt/2` and
-  `gakudan:resume/2`. Pauses a run, persists the snapshot, and lets the
-  caller hand it back to the loop after out-of-band input. See
-  [ADR 0004](docs/adr/0004-resume-interrupt-idempotency.md).
-- **`gakudan_runs_resumer`** boots after the runs supervisor on app start.
-  Asks the configured default checkpointer for active runs and respawns
-  each. One bad snapshot is logged + marked failed; it does not block the
-  rest.
-- **`initial_messages` config key** on `start_run/1`. Optional list of
-  `#{role := system | user, content := binary()}` entries appended to the
-  blackboard immediately after `finish_init`, before any agent turn fires.
-  Lets callers inject RAG output, doc context, or prior-conversation
-  summaries without baking them into agent `system_prompt/0` callbacks.
-  Closes [#14](https://github.com/Taure/gakudan/issues/14).
-- **Checkpoint telemetry**: `[gakudan, checkpoint, save | load,
-  start | stop | exception]` spans + `[gakudan, resume, attempted |
-  succeeded | failed]` events. Extends the public surface locked in
-  ADR 0001.
+- **Streaming LLM responses.** Optional `gakudan_llm:stream_call/3`
+  callback lets backends push token-by-token deltas to a per-call
+  subscriber pid. Backends that do not implement it transparently fall
+  back to `complete/2` wrapped in a single `text_delta` event, so the
+  API surface stays uniform.
+- **Per-run stream pubsub** (`gakudan_stream`) runs alongside the
+  blackboard in each run's supervision tree. Subscribers receive
+  `{gakudan_stream, RunId, Event}` messages.
+- **Public API:** `gakudan:subscribe_stream/1` and
+  `gakudan:unsubscribe_stream/2`. Slow subscribers fall behind on their
+  own mailbox; monitor cleanup removes them on crash. Cancellation and
+  backpressure deferred to v0.4.
+- **`gakudan_llm_stub` streaming variant.** Scripted responses now
+  accept a `{stream_chunks, [binary()]}` form that emits one
+  `text_delta` per chunk, for multi-event test coverage.
+- **Streaming telemetry**: `[gakudan, llm, stream, start | token |
+  complete]` events. Extends ADR 0001. Token events are high-volume;
+  consumers should sample or batch. See
+  [ADR 0005](docs/adr/0005-streaming.md).
 - `gakudan_llm_anthropic` now marks the system prompt and tool definitions
   with `cache_control: {type: ephemeral}` so Anthropic caches them across
   calls within the 5-minute window. For multi-turn agent runs, this drops
