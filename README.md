@@ -178,6 +178,35 @@ end, undefined).
 Full event surface in [`docs/adr/0001-telemetry-events.md`](docs/adr/0001-telemetry-events.md);
 public API from v0.1 onward.
 
+## Persistence (v0.2)
+
+Runs survive a BEAM restart when a checkpointer is configured. The
+default impl uses `kura` and works against any kura backend
+(`kura_postgres` for prod, `kura_sqlite` for local / embedded).
+
+```erlang
+%% sys.config
+[{kura, [
+    {dialect, kura_dialect_pg},
+    {repos, #{
+        my_repo => #{backend => kura_backend_postgres, database => "my_app"}
+    }}
+]},
+ {gakudan, [
+    {default_checkpointer, {gakudan_checkpointer_kura, #{repo => my_repo}}}
+]}].
+```
+
+Run config can also pass `checkpointer => {Mod, Opts}` per-run to override
+the default. Without a checkpointer, runs behave as in v0.1 (in-memory only).
+
+`gakudan:interrupt(RunId, Reason)` pauses a run and persists the
+snapshot. `gakudan:resume(RunId, Payload)` hands a `user`-role entry back
+to the loop. See [ADR 0004](docs/adr/0004-resume-interrupt-idempotency.md).
+
+`initial_messages` on `start_run/1` lets callers inject RAG output / doc
+grounding into the blackboard before the first turn fires.
+
 ## Companion libraries
 
 | Library | What it adds |
@@ -187,8 +216,8 @@ public API from v0.1 onward.
 
 ## Status
 
-v0.1.x - single-node only. No multi-node distribution, no built-in dashboard.
-Streaming responses land in v0.2.
+v0.2 - single-node persistence via checkpointer behaviour; human-in-the-loop
+interrupt / resume. No multi-node distribution, no streaming responses yet.
 
 ## Why "gakudan"?
 

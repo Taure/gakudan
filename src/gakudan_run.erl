@@ -4,7 +4,7 @@ Run-level operations. Looks up the run by id via `gakudan_registry`
 and delegates to the run's gen_statem.
 """.
 
--export([send/2, status/1, stop/1, await/2, blackboard/1]).
+-export([send/2, status/1, stop/1, await/2, blackboard/1, interrupt/2, resume/2]).
 
 -spec send(gakudan:run_id(), binary()) -> ok | {error, not_found}.
 send(RunId, Message) ->
@@ -26,6 +26,14 @@ await(RunId, Timeout) ->
 -spec blackboard(gakudan:run_id()) -> {ok, pid()} | {error, not_found}.
 blackboard(RunId) ->
     with_run(RunId, fun(#{blackboard := Pid}) -> {ok, Pid} end).
+
+-spec interrupt(gakudan:run_id(), term()) -> ok | {error, not_found | not_interruptible}.
+interrupt(RunId, Reason) ->
+    with_run(RunId, fun(#{run_statem := Pid}) -> gakudan_run_statem:interrupt(Pid, Reason) end).
+
+-spec resume(gakudan:run_id(), term()) -> ok | {error, not_found | not_interrupted}.
+resume(RunId, Payload) ->
+    with_run(RunId, fun(#{run_statem := Pid}) -> gakudan_run_statem:resume(Pid, Payload) end).
 
 with_run(RunId, Fun) ->
     case gakudan_registry:lookup(RunId) of

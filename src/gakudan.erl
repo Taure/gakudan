@@ -18,21 +18,33 @@ gakudan:send(RunId, ~"Build a small TCP echo server in Erlang."),
 ```
 """.
 
--export([start_run/1, send/2, status/1, stop/1, await/2]).
+-export([start_run/1, send/2, status/1, stop/1, await/2, interrupt/2, resume/2]).
 
--export_type([run_id/0, run_config/0, agent_spec/0, router_spec/0, llm_spec/0]).
+-export_type([
+    run_id/0,
+    run_config/0,
+    agent_spec/0,
+    router_spec/0,
+    llm_spec/0,
+    checkpointer_spec/0,
+    initial_message/0
+]).
 
 -type run_id() :: binary().
 -type agent_spec() :: module() | {module(), Opts :: map()}.
 -type router_spec() :: {module(), Opts :: map()}.
 -type llm_spec() :: {module(), Opts :: map()}.
+-type checkpointer_spec() :: {module(), Opts :: map()}.
+-type initial_message() :: #{role := system | user, content := binary()}.
 
 -type run_config() :: #{
     run_id => run_id(),
     agents := [agent_spec(), ...],
     router := router_spec(),
     llm := llm_spec(),
-    max_turns => pos_integer()
+    max_turns => pos_integer(),
+    checkpointer => checkpointer_spec(),
+    initial_messages => [initial_message()]
 }.
 
 -doc "Start a new run. Returns the supervisor pid and the run id.".
@@ -61,6 +73,24 @@ stop(RunId) ->
     {ok, [gakudan_blackboard:entry()]} | {error, timeout | not_found}.
 await(RunId, Timeout) ->
     gakudan_run:await(RunId, Timeout).
+
+-doc """
+Pause a run and put it into the `awaiting_human` state. A `system`-role
+entry is appended to the blackboard recording the reason. Persisted via
+the configured checkpointer; the run survives BEAM restart in this state.
+""".
+-spec interrupt(run_id(), term()) -> ok | {error, not_found | not_interruptible}.
+interrupt(RunId, Reason) ->
+    gakudan_run:interrupt(RunId, Reason).
+
+-doc """
+Resume a run that is in `awaiting_human`. `Payload` is appended to the
+blackboard as a `user`-role entry; the router is then re-consulted and
+the loop continues.
+""".
+-spec resume(run_id(), term()) -> ok | {error, not_found | not_interrupted}.
+resume(RunId, Payload) ->
+    gakudan_run:resume(RunId, Payload).
 
 ensure_run_id(#{run_id := _} = Config) ->
     Config;

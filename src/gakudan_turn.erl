@@ -1,7 +1,7 @@
 -module(gakudan_turn).
 -moduledoc false.
 
--export([run/6]).
+-export([run/8]).
 
 -define(MAX_TOOL_ITERATIONS, 10).
 
@@ -9,25 +9,44 @@
     gakudan:run_id(),
     gakudan_agent:id(),
     module(),
+    pos_integer(),
+    undefined | {module(), term()},
     module(),
     map(),
     pid()
 ) -> ok.
-run(RunId, AgentId, AgentMod, LlmMod, LlmOpts, Blackboard) ->
+run(RunId, AgentId, AgentMod, Turn, Checkpointer, LlmMod, LlmOpts, Blackboard) ->
     System = AgentMod:system_prompt(),
     Tools = [T:spec() || T <- AgentMod:tools()],
     Model = AgentMod:model(),
     Transcript = gakudan_blackboard:entries(Blackboard),
     Messages = transcript_to_messages(Transcript, AgentId),
-    loop(RunId, AgentId, AgentMod, System, Tools, Model, LlmMod, LlmOpts, Blackboard, Messages, 0).
+    Ctx = #{
+        run_id => RunId,
+        agent_id => AgentId,
+        turn => Turn,
+        checkpointer => Checkpointer
+    },
+    loop(Ctx, AgentMod, System, Tools, Model, LlmMod, LlmOpts, Blackboard, Messages, 0).
 
-loop(_RunId, _AgentId, _AgentMod, _Sys, _Tools, _Model, _LMod, _LOpts, _BB, _Msgs, N) when
+loop(_Ctx, _AgentMod, _Sys, _Tools, _Model, _LMod, _LOpts, _BB, _Msgs, N) when
     N >= ?MAX_TOOL_ITERATIONS
 ->
     ok;
-loop(RunId, AgentId, AgentMod, Sys, Tools, Model, LMod, LOpts, BB, Msgs, N) ->
+loop(
+    #{run_id := RunId, agent_id := AgentId} = Ctx,
+    AgentMod,
+    Sys,
+    Tools,
+    Model,
+    LMod,
+    LOpts,
+    BB,
+    Msgs,
+    N
+) ->
     Req = #{model => Model, system => Sys, tools => Tools, messages => Msgs},
-    case complete_with_telemetry(RunId, AgentId, LMod, Model, Req, LOpts) of
+    case complete_with_idempotency(Ctx, N, LMod, Model, Req, LOpts) of
         {ok, #{stop_reason := end_turn, content := Content}} ->
             Text = collect_text(Content),
             {ok, _} = gakudan_blackboard:append(BB, {agent, AgentId}, Text),
@@ -38,8 +57,7 @@ loop(RunId, AgentId, AgentMod, Sys, Tools, Model, LMod, LOpts, BB, Msgs, N) ->
             AssistantTurn = #{role => assistant, content => Content},
             UserTurn = #{role => user, content => ToolResults},
             loop(
-                RunId,
-                AgentId,
+                Ctx,
                 AgentMod,
                 Sys,
                 Tools,
@@ -53,6 +71,55 @@ loop(RunId, AgentId, AgentMod, Sys, Tools, Model, LMod, LOpts, BB, Msgs, N) ->
         {error, Reason} ->
             error({llm_error, Reason})
     end.
+
+complete_with_idempotency(Ctx, Iter, LMod, Model, Req, LOpts) ->
+    #{run_id := RunId, agent_id := AgentId, turn := Turn, checkpointer := Checkpointer} = Ctx,
+    StepId = step_id(RunId, Turn, AgentId, Iter),
+    case Checkpointer of
+        undefined ->
+            complete_with_telemetry(RunId, AgentId, LMod, Model, Req, LOpts);
+        _ ->
+            case gakudan_checkpointer:load_step(Checkpointer, RunId, StepId) of
+                {ok, #{response := CachedResp}} ->
+                    {ok, CachedResp};
+                {error, not_found} ->
+                    case complete_with_telemetry(RunId, AgentId, LMod, Model, Req, LOpts) of
+                        {ok, Resp} = Ok ->
+                            persist_step(Checkpointer, RunId, StepId, AgentId, Turn, Req, Resp),
+                            Ok;
+                        {error, _} = Err ->
+                            Err
+                    end
+            end
+    end.
+
+persist_step(Checkpointer, RunId, StepId, AgentId, Turn, Req, Resp) ->
+    Usage = maps:get(usage, Resp, #{input_tokens => 0, output_tokens => 0}),
+    Step = #{
+        run_id => RunId,
+        step_id => StepId,
+        agent_id => AgentId,
+        turn => Turn,
+        request => Req,
+        response => Resp,
+        usage => Usage,
+        inserted_at => erlang:system_time(millisecond)
+    },
+    _ = gakudan_checkpointer:save_step(Checkpointer, Step),
+    ok.
+
+step_id(RunId, Turn, AgentId, Iter) ->
+    Input = iolist_to_binary([
+        RunId,
+        $|,
+        integer_to_binary(Turn),
+        $|,
+        atom_to_binary(AgentId),
+        $|,
+        integer_to_binary(Iter)
+    ]),
+    Hash = crypto:hash(sha256, Input),
+    binary:encode_hex(Hash, lowercase).
 
 complete_with_telemetry(RunId, AgentId, LMod, Model, Req, LOpts) ->
     StartMeta = #{run_id => RunId, agent_id => AgentId, backend => LMod, model => Model},

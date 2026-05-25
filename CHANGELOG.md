@@ -9,6 +9,32 @@ and gakudan uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Persistence layer** behind a new `gakudan_checkpointer` behaviour. Runs
+  with a configured checkpointer survive a BEAM restart. Snapshots capture
+  the blackboard, KV scratchpad, router state, and run statem state; step
+  records capture each LLM request / response keyed by a deterministic
+  `step_id` so resume does not re-bill completed steps. Default impl
+  `gakudan_checkpointer_kura` ships in core and works against any
+  `kura` 2.x backend (e.g. `kura_postgres`, `kura_sqlite`). See
+  [ADR 0003](docs/adr/0003-checkpointer-behaviour.md).
+- **`awaiting_human` run state** with `gakudan:interrupt/2` and
+  `gakudan:resume/2`. Pauses a run, persists the snapshot, and lets the
+  caller hand it back to the loop after out-of-band input. See
+  [ADR 0004](docs/adr/0004-resume-interrupt-idempotency.md).
+- **`gakudan_runs_resumer`** boots after the runs supervisor on app start.
+  Asks the configured default checkpointer for active runs and respawns
+  each. One bad snapshot is logged + marked failed; it does not block the
+  rest.
+- **`initial_messages` config key** on `start_run/1`. Optional list of
+  `#{role := system | user, content := binary()}` entries appended to the
+  blackboard immediately after `finish_init`, before any agent turn fires.
+  Lets callers inject RAG output, doc context, or prior-conversation
+  summaries without baking them into agent `system_prompt/0` callbacks.
+  Closes [#14](https://github.com/Taure/gakudan/issues/14).
+- **Checkpoint telemetry**: `[gakudan, checkpoint, save | load,
+  start | stop | exception]` spans + `[gakudan, resume, attempted |
+  succeeded | failed]` events. Extends the public surface locked in
+  ADR 0001.
 - `gakudan_llm_anthropic` now marks the system prompt and tool definitions
   with `cache_control: {type: ephemeral}` so Anthropic caches them across
   calls within the 5-minute window. For multi-turn agent runs, this drops
