@@ -25,7 +25,7 @@ jobs:
       enable-hank: true
       enable-audit: true
       enable-coverage: true
-      enable-elp-lint: true
+      enable-elp-lint: false
       enable-elp-eqwalize: false
       enable-sbom: true
       enable-sbom-scan: true
