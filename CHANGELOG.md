@@ -9,6 +9,15 @@ and gakudan uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Anthropic streaming backend.** `gakudan_llm_anthropic:stream_call/3`
+  hits `/v1/messages` with `stream: true`, parses the SSE wire format,
+  and emits `gakudan_llm:stream_event()` to the subscriber as tokens
+  arrive. Tracks per-index `text` and `tool_use` content blocks,
+  accumulates `usage` (including `cache_read_input_tokens` /
+  `cache_creation_input_tokens`), and finalises the canonical response
+  on `message_stop`. SSE parser and event-mapping helpers are exposed
+  (`parse_sse/2`, `apply_anthropic_event/2`) for downstream consumers
+  and unit-testing.
 - **Streaming LLM responses.** Optional `gakudan_llm:stream_call/3`
   callback lets backends push token-by-token deltas to a per-call
   subscriber pid. Backends that do not implement it transparently fall
