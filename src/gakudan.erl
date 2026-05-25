@@ -19,6 +19,7 @@ gakudan:send(RunId, ~"Build a small TCP echo server in Erlang."),
 """.
 
 -export([start_run/1, send/2, status/1, stop/1, await/2, interrupt/2, resume/2]).
+-export([subscribe_stream/1, unsubscribe_stream/2]).
 
 -export_type([
     run_id/0,
@@ -91,6 +92,20 @@ the loop continues.
 -spec resume(run_id(), term()) -> ok | {error, not_found | not_interrupted}.
 resume(RunId, Payload) ->
     gakudan_run:resume(RunId, Payload).
+
+-doc """
+Subscribe the calling process to this run's stream channel. The
+caller will start receiving `{gakudan_stream, RunId, Event}` messages
+for every token delta. See [ADR 0005](docs/adr/0005-streaming.md).
+""".
+-spec subscribe_stream(run_id()) -> {ok, reference()} | {error, not_found}.
+subscribe_stream(RunId) ->
+    gakudan_run:subscribe_stream(RunId).
+
+-doc "Unsubscribe a stream reference previously returned by `subscribe_stream/1`.".
+-spec unsubscribe_stream(run_id(), reference()) -> ok | {error, not_found}.
+unsubscribe_stream(RunId, Ref) ->
+    gakudan_run:unsubscribe_stream(RunId, Ref).
 
 ensure_run_id(#{run_id := _} = Config) ->
     Config;

@@ -1,7 +1,7 @@
 -module(gakudan_turn).
 -moduledoc false.
 
--export([run/8]).
+-export([run/9]).
 
 -define(MAX_TOOL_ITERATIONS, 10).
 
@@ -13,9 +13,10 @@
     undefined | {module(), term()},
     module(),
     map(),
-    pid()
+    pid(),
+    undefined | pid()
 ) -> ok.
-run(RunId, AgentId, AgentMod, Turn, Checkpointer, LlmMod, LlmOpts, Blackboard) ->
+run(RunId, AgentId, AgentMod, Turn, Checkpointer, LlmMod, LlmOpts, Blackboard, Stream) ->
     System = AgentMod:system_prompt(),
     Tools = [T:spec() || T <- AgentMod:tools()],
     Model = AgentMod:model(),
@@ -24,66 +25,68 @@ run(RunId, AgentId, AgentMod, Turn, Checkpointer, LlmMod, LlmOpts, Blackboard) -
     Ctx = #{
         run_id => RunId,
         agent_id => AgentId,
+        agent_mod => AgentMod,
+        sys => System,
+        tools => Tools,
+        model => Model,
         turn => Turn,
-        checkpointer => Checkpointer
+        checkpointer => Checkpointer,
+        llm_mod => LlmMod,
+        llm_opts => LlmOpts,
+        bb => Blackboard,
+        stream => Stream
     },
-    loop(Ctx, AgentMod, System, Tools, Model, LlmMod, LlmOpts, Blackboard, Messages, 0).
+    loop(Ctx, Messages, 0).
 
-loop(_Ctx, _AgentMod, _Sys, _Tools, _Model, _LMod, _LOpts, _BB, _Msgs, N) when
-    N >= ?MAX_TOOL_ITERATIONS
-->
+loop(_Ctx, _Msgs, N) when N >= ?MAX_TOOL_ITERATIONS ->
     ok;
-loop(
-    #{run_id := RunId, agent_id := AgentId} = Ctx,
-    AgentMod,
-    Sys,
-    Tools,
-    Model,
-    LMod,
-    LOpts,
-    BB,
-    Msgs,
-    N
-) ->
+loop(Ctx, Msgs, N) ->
+    #{
+        agent_id := AgentId,
+        agent_mod := AgentMod,
+        sys := Sys,
+        tools := Tools,
+        model := Model,
+        bb := BB
+    } = Ctx,
     Req = #{model => Model, system => Sys, tools => Tools, messages => Msgs},
-    case complete_with_idempotency(Ctx, N, LMod, Model, Req, LOpts) of
+    case complete_with_idempotency(Ctx, N, Req) of
         {ok, #{stop_reason := end_turn, content := Content}} ->
             Text = collect_text(Content),
             {ok, _} = gakudan_blackboard:append(BB, {agent, AgentId}, Text),
             ok;
         {ok, #{stop_reason := tool_use, content := Content}} ->
             ToolUses = [B || #{type := tool_use} = B <- Content],
+            #{run_id := RunId} = Ctx,
             ToolResults = run_tools(RunId, AgentId, AgentMod:tools(), ToolUses),
             AssistantTurn = #{role => assistant, content => Content},
             UserTurn = #{role => user, content => ToolResults},
-            loop(
-                Ctx,
-                AgentMod,
-                Sys,
-                Tools,
-                Model,
-                LMod,
-                LOpts,
-                BB,
-                Msgs ++ [AssistantTurn, UserTurn],
-                N + 1
-            );
+            loop(Ctx, Msgs ++ [AssistantTurn, UserTurn], N + 1);
         {error, Reason} ->
             error({llm_error, Reason})
     end.
 
-complete_with_idempotency(Ctx, Iter, LMod, Model, Req, LOpts) ->
-    #{run_id := RunId, agent_id := AgentId, turn := Turn, checkpointer := Checkpointer} = Ctx,
+complete_with_idempotency(Ctx, Iter, Req) ->
+    #{
+        run_id := RunId,
+        agent_id := AgentId,
+        turn := Turn,
+        checkpointer := Checkpointer,
+        llm_mod := LMod,
+        llm_opts := LOpts,
+        model := Model,
+        stream := Stream
+    } = Ctx,
     StepId = step_id(RunId, Turn, AgentId, Iter),
     case Checkpointer of
         undefined ->
-            complete_with_telemetry(RunId, AgentId, LMod, Model, Req, LOpts);
+            stream_with_telemetry(RunId, AgentId, LMod, Model, Req, LOpts, Stream);
         _ ->
             case gakudan_checkpointer:load_step(Checkpointer, RunId, StepId) of
                 {ok, #{response := CachedResp}} ->
                     {ok, CachedResp};
                 {error, not_found} ->
-                    case complete_with_telemetry(RunId, AgentId, LMod, Model, Req, LOpts) of
+                    case stream_with_telemetry(RunId, AgentId, LMod, Model, Req, LOpts, Stream) of
                         {ok, Resp} = Ok ->
                             persist_step(Checkpointer, RunId, StepId, AgentId, Turn, Req, Resp),
                             Ok;
@@ -121,13 +124,28 @@ step_id(RunId, Turn, AgentId, Iter) ->
     Hash = crypto:hash(sha256, Input),
     binary:encode_hex(Hash, lowercase).
 
-complete_with_telemetry(RunId, AgentId, LMod, Model, Req, LOpts) ->
-    StartMeta = #{run_id => RunId, agent_id => AgentId, backend => LMod, model => Model},
-    telemetry:span(
+stream_with_telemetry(RunId, AgentId, LMod, Model, Req, LOpts, Stream) ->
+    StartMeta = #{
+        run_id => RunId,
+        agent_id => AgentId,
+        backend => LMod,
+        model => Model
+    },
+    Ref = make_ref(),
+    telemetry:execute(
+        [gakudan, llm, stream, start],
+        #{system_time => erlang:system_time()},
+        StartMeta#{request_id => Ref}
+    ),
+    Parent = self(),
+    Collector = spawn_link(fun() ->
+        collect_events(Parent, Ref, RunId, AgentId, Stream)
+    end),
+    Result = telemetry:span(
         [gakudan, llm, request],
         StartMeta,
         fun() ->
-            case LMod:complete(Req, LOpts) of
+            case gakudan_llm:stream(LMod, Req, LOpts#{stream_request_id => Ref}, Collector) of
                 {ok, Resp} = Ok ->
                     Usage = maps:get(usage, Resp, #{input_tokens => 0, output_tokens => 0}),
                     Measurements = #{
@@ -140,7 +158,61 @@ complete_with_telemetry(RunId, AgentId, LMod, Model, Req, LOpts) ->
                     {Err, Measurements, StartMeta#{outcome => error, reason => Reason}}
             end
         end
-    ).
+    ),
+    Collector ! {gakudan_llm_stream, Ref, drain},
+    receive
+        {collector_done, Ref, EventCount} ->
+            telemetry:execute(
+                [gakudan, llm, stream, complete],
+                #{events => EventCount},
+                StartMeta#{request_id => Ref, outcome => stream_outcome(Result)}
+            )
+    after 1000 ->
+        ok
+    end,
+    Result.
+
+stream_outcome({ok, _}) -> ok;
+stream_outcome({error, _}) -> error.
+
+collect_events(Parent, Ref, RunId, AgentId, Stream) ->
+    collect_events_loop(Parent, Ref, RunId, AgentId, Stream, 0).
+
+collect_events_loop(Parent, Ref, RunId, AgentId, Stream, N) ->
+    receive
+        {gakudan_llm_stream, Ref, drain} ->
+            Parent ! {collector_done, Ref, N};
+        {gakudan_llm_stream, Ref, Event} = _Msg ->
+            maybe_publish(Stream, AgentId, Ref, Event),
+            maybe_token_telemetry(RunId, AgentId, Ref, Event),
+            collect_events_loop(Parent, Ref, RunId, AgentId, Stream, N + 1)
+    end.
+
+maybe_publish(undefined, _AgentId, _Ref, _Event) ->
+    ok;
+maybe_publish(Stream, AgentId, Ref, Event) ->
+    Meta = #{agent_id => AgentId, request_id => Ref},
+    gakudan_stream:publish(Stream, Meta, Event).
+
+maybe_token_telemetry(RunId, AgentId, Ref, {text_delta, Delta}) ->
+    telemetry:execute(
+        [gakudan, llm, stream, token],
+        #{bytes => byte_size(Delta)},
+        #{run_id => RunId, agent_id => AgentId, request_id => Ref, event_type => text_delta}
+    );
+maybe_token_telemetry(RunId, AgentId, Ref, {tool_use_input_delta, #{partial_json := J}}) ->
+    telemetry:execute(
+        [gakudan, llm, stream, token],
+        #{bytes => byte_size(J)},
+        #{
+            run_id => RunId,
+            agent_id => AgentId,
+            request_id => Ref,
+            event_type => tool_use_input_delta
+        }
+    );
+maybe_token_telemetry(_RunId, _AgentId, _Ref, _Event) ->
+    ok.
 
 transcript_to_messages(Entries, Self) ->
     %% Map blackboard log into Anthropic-style role/content messages.

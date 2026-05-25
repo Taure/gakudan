@@ -207,6 +207,24 @@ to the loop. See [ADR 0004](docs/adr/0004-resume-interrupt-idempotency.md).
 `initial_messages` on `start_run/1` lets callers inject RAG output / doc
 grounding into the blackboard before the first turn fires.
 
+## Streaming (v0.3)
+
+Subscribe to a run to receive token-by-token deltas as they arrive from
+the backend:
+
+```erlang
+{ok, _Ref} = gakudan:subscribe_stream(RunId),
+receive
+    {gakudan_stream, RunId, #{payload := {text_delta, Chunk}}} ->
+        io:format("~s", [Chunk])
+end.
+```
+
+Backends that do not implement `gakudan_llm:stream_call/3` fall back to
+`complete/2` wrapped in a single `text_delta` event, so the API is
+uniform whether the underlying provider streams or not. Full event
+catalogue in [ADR 0005](docs/adr/0005-streaming.md).
+
 ## Companion libraries
 
 | Library | What it adds |

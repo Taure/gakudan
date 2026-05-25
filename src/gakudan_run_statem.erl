@@ -11,6 +11,7 @@
     run_id :: gakudan:run_id(),
     run_sup :: pid(),
     blackboard :: undefined | pid(),
+    stream :: undefined | pid(),
     config :: gakudan:run_config(),
     agents :: #{atom() => {module(), map()}},
     agent_ids :: [atom()],
@@ -133,16 +134,22 @@ handle_event(enter, _Old, initialising, _Data) ->
     keep_state_and_data;
 handle_event(internal, finish_init, initialising, Data) ->
     Blackboard = find_child(Data#data.run_sup, blackboard),
-    ok = gakudan_registry:register(Data#data.run_id, Data#data.run_sup, self(), Blackboard),
-    Data1 = Data#data{blackboard = Blackboard},
+    Stream = find_child(Data#data.run_sup, stream),
+    ok = gakudan_registry:register(
+        Data#data.run_id, Data#data.run_sup, self(), Blackboard, Stream
+    ),
+    Data1 = Data#data{blackboard = Blackboard, stream = Stream},
     Data2 = append_initial_messages(Data1),
     emit_run_start(Data2),
     save_snapshot(idle, Data2),
     {next_state, idle, Data2};
 handle_event(internal, {finish_resume, PriorState}, initialising, Data) ->
     Blackboard = find_child(Data#data.run_sup, blackboard),
-    ok = gakudan_registry:register(Data#data.run_id, Data#data.run_sup, self(), Blackboard),
-    Data1 = Data#data{blackboard = Blackboard},
+    Stream = find_child(Data#data.run_sup, stream),
+    ok = gakudan_registry:register(
+        Data#data.run_id, Data#data.run_sup, self(), Blackboard, Stream
+    ),
+    Data1 = Data#data{blackboard = Blackboard, stream = Stream},
     emit_run_start(Data1),
     NextState =
         case PriorState of
@@ -296,6 +303,7 @@ start_turn(AgentId, Data) ->
         llm_mod = LMod,
         llm_opts = LOpts,
         blackboard = BB,
+        stream = Stream,
         turn = T,
         checkpointer = Checkpointer
     } = Data,
@@ -308,7 +316,7 @@ start_turn(AgentId, Data) ->
     {Pid, _} = spawn_monitor(fun() ->
         try
             ok = gakudan_turn:run(
-                RunId, AgentId, AgentMod, TurnNumber, Checkpointer, LMod, LOpts, BB
+                RunId, AgentId, AgentMod, TurnNumber, Checkpointer, LMod, LOpts, BB, Stream
             ),
             Self ! {turn_complete, Ref, Data#data.router_state}
         catch

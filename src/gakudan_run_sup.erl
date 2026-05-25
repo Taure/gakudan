@@ -22,6 +22,11 @@ init({fresh, #{run_id := RunId} = Config}) ->
             type => worker
         },
         #{
+            id => stream,
+            start => {gakudan_stream, start_link, [RunId]},
+            type => worker
+        },
+        #{
             id => run_statem,
             start => {gakudan_run_statem, start_link, [Self, Config]},
             type => worker
