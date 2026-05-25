@@ -3,7 +3,7 @@
 
 -behaviour(supervisor).
 
--export([start_link/0, start_run/1, stop_run/1]).
+-export([start_link/0, start_run/1, resume_run/2, stop_run/1]).
 -export([init/1]).
 
 start_link() ->
@@ -13,15 +13,27 @@ start_link() ->
 start_run(Config) ->
     case supervisor:start_child(?MODULE, [Config]) of
         {ok, SupPid} ->
-            RunId = maps:get(run_id, Config),
-            {run_statem, StatemPid, _, _} = lists:keyfind(
-                run_statem, 1, supervisor:which_children(SupPid)
-            ),
-            ok = gakudan_run_statem:wait_ready(StatemPid),
-            {ok, SupPid, RunId};
+            wait_ready_and_return(SupPid, Config);
         {error, _} = Err ->
             Err
     end.
+
+-spec resume_run(gakudan:run_config(), map()) -> {ok, pid(), gakudan:run_id()} | {error, term()}.
+resume_run(Config, Snapshot) ->
+    case supervisor:start_child(?MODULE, [Config, Snapshot]) of
+        {ok, SupPid} ->
+            wait_ready_and_return(SupPid, Config);
+        {error, _} = Err ->
+            Err
+    end.
+
+wait_ready_and_return(SupPid, Config) ->
+    RunId = maps:get(run_id, Config),
+    {run_statem, StatemPid, _, _} = lists:keyfind(
+        run_statem, 1, supervisor:which_children(SupPid)
+    ),
+    ok = gakudan_run_statem:wait_ready(StatemPid),
+    {ok, SupPid, RunId}.
 
 -spec stop_run(pid()) -> ok | {error, not_found}.
 stop_run(SupPid) when is_pid(SupPid) ->

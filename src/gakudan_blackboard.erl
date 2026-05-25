@@ -9,11 +9,13 @@ Subscribers receive `{gakudan_blackboard, RunId, {entry_added, Entry}}` messages
 
 -export([
     start_link/1,
+    start_link/2,
     append/3,
     entries/1,
     put/3,
     get/2,
-    subscribe/1
+    subscribe/1,
+    snapshot/1
 ]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2]).
 
@@ -36,7 +38,13 @@ Subscribers receive `{gakudan_blackboard, RunId, {entry_added, Entry}}` messages
 }).
 
 start_link(RunId) ->
-    gen_server:start_link(?MODULE, RunId, []).
+    gen_server:start_link(?MODULE, #{run_id => RunId}, []).
+
+-doc "Start a blackboard pre-populated with prior entries + kv (used on resume).".
+-spec start_link(gakudan:run_id(), #{entries := [entry()], kv := #{atom() => term()}}) ->
+    {ok, pid()} | {error, term()}.
+start_link(RunId, Restore) ->
+    gen_server:start_link(?MODULE, #{run_id => RunId, restore => Restore}, []).
 
 -spec append(pid(), role(), binary() | [map()]) -> {ok, entry()}.
 append(Pid, Role, Content) ->
@@ -58,10 +66,21 @@ get(Pid, Key) ->
 subscribe(Pid) ->
     gen_server:call(Pid, {subscribe, self()}).
 
-init(RunId) ->
+-doc "Capture current entries + kv for persistence.".
+-spec snapshot(pid()) -> #{entries := [entry()], kv := #{atom() => term()}}.
+snapshot(Pid) ->
+    gen_server:call(Pid, snapshot).
+
+init(#{run_id := RunId} = Args) ->
     EntriesTab = ets:new(entries, [ordered_set, private]),
     KvTab = ets:new(kv, [set, private]),
-    {ok, #state{run_id = RunId, entries_tab = EntriesTab, kv_tab = KvTab}}.
+    State0 = #state{run_id = RunId, entries_tab = EntriesTab, kv_tab = KvTab},
+    State =
+        case maps:get(restore, Args, undefined) of
+            undefined -> State0;
+            #{entries := Entries, kv := Kv} -> restore_state(State0, Entries, Kv)
+        end,
+    {ok, State}.
 
 handle_call({append, Role, Content}, _From, State) ->
     #state{entries_tab = Tab, seq = Seq, run_id = RunId, subscribers = Subs} = State,
@@ -92,7 +111,11 @@ handle_call({get, Key}, _From, State) ->
 handle_call({subscribe, Pid}, _From, State) ->
     Ref = erlang:monitor(process, Pid),
     Subs = (State#state.subscribers)#{Ref => Pid},
-    {reply, {ok, Ref}, State#state{subscribers = Subs}}.
+    {reply, {ok, Ref}, State#state{subscribers = Subs}};
+handle_call(snapshot, _From, State) ->
+    Entries = [E || {_Seq, E} <- ets:tab2list(State#state.entries_tab)],
+    Kv = maps:from_list(ets:tab2list(State#state.kv_tab)),
+    {reply, #{entries => Entries, kv => Kv}, State}.
 
 handle_cast(_Msg, State) ->
     {noreply, State}.
@@ -102,3 +125,16 @@ handle_info({'DOWN', Ref, process, _Pid, _Reason}, State) ->
     {noreply, State#state{subscribers = Subs}};
 handle_info(_, State) ->
     {noreply, State}.
+
+restore_state(State, Entries, Kv) ->
+    lists:foreach(
+        fun(#{seq := Seq} = Entry) -> ets:insert(State#state.entries_tab, {Seq, Entry}) end,
+        Entries
+    ),
+    maps:foreach(fun(K, V) -> ets:insert(State#state.kv_tab, {K, V}) end, Kv),
+    MaxSeq =
+        case Entries of
+            [] -> 0;
+            _ -> lists:max([Seq || #{seq := Seq} <- Entries])
+        end,
+    State#state{seq = MaxSeq}.

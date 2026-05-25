@@ -1,9 +1,9 @@
 {application, gakudan, [
     {description, "Multi-agent collaboration primitives for the BEAM"},
     {vsn, "git"},
-    {registered, [gakudan_sup, gakudan_runs_sup]},
+    {registered, [gakudan_sup, gakudan_runs_sup, gakudan_runs_resumer]},
     {mod, {gakudan_app, []}},
-    {applications, [kernel, stdlib, crypto, inets, ssl, telemetry]},
+    {applications, [kernel, stdlib, crypto, inets, ssl, telemetry, kura]},
     {env, []},
     {modules, []},
     {licenses, ["MIT"]},
