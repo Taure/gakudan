@@ -9,6 +9,12 @@ and gakudan uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`gakudan_llm_anthropic:feed_stream_chunk/4`** (plus `fresh_stream_acc/0`
+  and `finalise/1`) exposed as the public testable seam for the streaming
+  pipeline. Three new CT cases drive a canned SSE byte sequence through
+  the whole flow and assert both the subscriber event sequence and the
+  finalised `gakudan_llm:response()`, including a chunk-boundary split
+  inside an event.
 - **Anthropic streaming backend.** `gakudan_llm_anthropic:stream_call/3`
   hits `/v1/messages` with `stream: true`, parses the SSE wire format,
   and emits `gakudan_llm:stream_event()` to the subscriber as tokens

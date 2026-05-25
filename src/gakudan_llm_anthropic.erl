@@ -28,6 +28,7 @@ to the standard `input_tokens` and `output_tokens`).
 -export([complete/2, stream_call/3]).
 -export([build_body/2, parse_response/1, system_with_cache/1, tools_with_cache/1]).
 -export([parse_sse/2, apply_anthropic_event/2]).
+-export([fresh_stream_acc/0, feed_stream_chunk/4, finalise/1]).
 -export_type([sse_acc/0, stream_acc/0]).
 
 -define(API_URL, "https://api.anthropic.com/v1/messages").
@@ -202,16 +203,33 @@ do_stream(ApiKey, Req, Opts, Subscriber) ->
             {error, Reason}
     end.
 
+-doc "Fresh streaming accumulator. Use as the initial state for `feed_stream_chunk/4`.".
+-spec fresh_stream_acc() -> stream_acc().
 fresh_stream_acc() ->
     #{blocks => #{}, stop_reason => undefined, usage => #{input_tokens => 0, output_tokens => 0}}.
+
+-doc """
+Feed one chunk of SSE bytes into the streaming pipeline. Updates the
+pending-byte accumulator and the streaming accumulator, emitting
+`gakudan_llm:stream_event()` messages to `Subscriber` as side effects.
+
+Returns `{NewPending, NewStreamAcc}`. Call repeatedly with successive
+chunks; on `message_stop` arrival call `finalise/1` on the final
+accumulator to get the canonical `gakudan_llm:response()`.
+""".
+-spec feed_stream_chunk(binary(), sse_acc(), stream_acc(), {pid(), reference()}) ->
+    {sse_acc(), stream_acc()}.
+feed_stream_chunk(Chunk, Pending, Acc, {Subscriber, Ref}) ->
+    {Events, NewPending} = parse_sse(Chunk, Pending),
+    NewAcc = dispatch_events(Events, Subscriber, Ref, Acc),
+    {NewPending, NewAcc}.
 
 stream_loop(ReqId, Subscriber, Ref, Pending, Acc, Timeout) ->
     receive
         {http, {ReqId, stream_start, _Headers}} ->
             stream_loop(ReqId, Subscriber, Ref, Pending, Acc, Timeout);
         {http, {ReqId, stream, Chunk}} ->
-            {Events, NewPending} = parse_sse(Chunk, Pending),
-            NewAcc = dispatch_events(Events, Subscriber, Ref, Acc),
+            {NewPending, NewAcc} = feed_stream_chunk(Chunk, Pending, Acc, {Subscriber, Ref}),
             stream_loop(ReqId, Subscriber, Ref, NewPending, NewAcc, Timeout);
         {http, {ReqId, stream_end, _Headers}} ->
             Resp = finalise(Acc),
@@ -394,6 +412,13 @@ apply_usage_update(Existing, Update) ->
         Pairs
     ).
 
+-doc """
+Collapse a fully-streamed accumulator into a canonical
+`gakudan_llm:response()`. Blocks are emitted in ascending index
+order; tool_use blocks have their accumulated `partial_json` decoded
+into the final `input` map.
+""".
+-spec finalise(stream_acc()) -> gakudan_llm:response().
 finalise(#{blocks := Blocks, stop_reason := SR, usage := Usage}) ->
     Indices = lists:sort(maps:keys(Blocks)),
     Content = [block_to_response(maps:get(I, Blocks)) || I <- Indices],

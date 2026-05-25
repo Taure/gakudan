@@ -21,7 +21,10 @@
     sse_parser_ignores_event_without_data/1,
     apply_event_accumulates_text_delta/1,
     apply_event_accumulates_tool_use_partial_json/1,
-    apply_event_records_stop_reason_and_usage/1
+    apply_event_records_stop_reason_and_usage/1,
+    e2e_text_only_stream/1,
+    e2e_stream_split_across_chunks/1,
+    e2e_tool_use_stream/1
 ]).
 
 all() ->
@@ -43,7 +46,10 @@ all() ->
         sse_parser_ignores_event_without_data,
         apply_event_accumulates_text_delta,
         apply_event_accumulates_tool_use_partial_json,
-        apply_event_records_stop_reason_and_usage
+        apply_event_records_stop_reason_and_usage,
+        e2e_text_only_stream,
+        e2e_stream_split_across_chunks,
+        e2e_tool_use_stream
     ].
 
 empty_system_passes_through(_Config) ->
@@ -287,3 +293,197 @@ apply_event_records_stop_reason_and_usage(_Config) ->
     Usage = maps:get(usage, Acc),
     ?assertEqual(5, maps:get(input_tokens, Usage)),
     ?assertEqual(12, maps:get(output_tokens, Usage)).
+
+%% End-to-end pipeline: canned SSE bytes -> subscriber events + finalised response.
+
+e2e_text_only_stream(_Config) ->
+    Ref = make_ref(),
+    SSE = canned_text_stream(),
+    {Pending, Acc} = drive_stream(Ref, [SSE]),
+    ?assertEqual(<<>>, Pending),
+    Resp = gakudan_llm_anthropic:finalise(Acc),
+    %% subscriber receives start/text_delta sequence/message_delta in order
+    Events = collect_stream_events(Ref, 200),
+    Texts = [T || {text_delta, T} <- Events],
+    ?assertEqual([~"Hello, ", ~"world", ~"!"], Texts),
+    ?assert(
+        lists:any(
+            fun
+                ({message_delta, _}) -> true;
+                (_) -> false
+            end,
+            Events
+        )
+    ),
+    %% finalised response
+    ?assertEqual(end_turn, maps:get(stop_reason, Resp)),
+    [#{type := text, text := Full}] = maps:get(content, Resp),
+    ?assertEqual(~"Hello, world!", Full),
+    Usage = maps:get(usage, Resp),
+    ?assertEqual(8, maps:get(input_tokens, Usage)),
+    ?assertEqual(5, maps:get(output_tokens, Usage)).
+
+e2e_stream_split_across_chunks(_Config) ->
+    %% Feed the same bytes but split inside an SSE event boundary.
+    Ref = make_ref(),
+    Full = canned_text_stream(),
+    Mid = byte_size(Full) div 2,
+    <<Chunk1:Mid/binary, Chunk2/binary>> = Full,
+    {Pending, Acc} = drive_stream(Ref, [Chunk1, Chunk2]),
+    ?assertEqual(<<>>, Pending),
+    Resp = gakudan_llm_anthropic:finalise(Acc),
+    Events = collect_stream_events(Ref, 200),
+    Texts = [T || {text_delta, T} <- Events],
+    ?assertEqual([~"Hello, ", ~"world", ~"!"], Texts),
+    [#{type := text, text := Joined}] = maps:get(content, Resp),
+    ?assertEqual(~"Hello, world!", Joined).
+
+e2e_tool_use_stream(_Config) ->
+    Ref = make_ref(),
+    SSE = canned_tool_use_stream(),
+    {_Pending, Acc} = drive_stream(Ref, [SSE]),
+    Resp = gakudan_llm_anthropic:finalise(Acc),
+    Events = collect_stream_events(Ref, 200),
+    %% subscriber sees tool_use_start then input_json deltas
+    ?assert(
+        lists:any(
+            fun
+                ({tool_use_start, #{id := ~"toolu_abc", name := ~"echo"}}) -> true;
+                (_) -> false
+            end,
+            Events
+        )
+    ),
+    JsonDeltas = [J || {tool_use_input_delta, #{partial_json := J}} <- Events],
+    ?assertEqual([~"{\"x\":", ~"1}"], JsonDeltas),
+    %% finalised response: tool_use stop_reason, input decoded from partial JSON
+    ?assertEqual(tool_use, maps:get(stop_reason, Resp)),
+    [Block] = maps:get(content, Resp),
+    ?assertEqual(tool_use, maps:get(type, Block)),
+    ?assertEqual(~"toolu_abc", maps:get(id, Block)),
+    ?assertEqual(~"echo", maps:get(name, Block)),
+    ?assertEqual(#{~"x" => 1}, maps:get(input, Block)).
+
+%% drives feed_stream_chunk/4 across a list of chunks, returning final {pending, stream_acc}.
+%% Sends subscriber messages to a child collector keyed off Ref.
+drive_stream(Ref, Chunks) ->
+    Self = self(),
+    Sub = spawn_link(fun() ->
+        Self ! {collector_ready, Ref},
+        collector_loop(Self, Ref, [])
+    end),
+    receive
+        {collector_ready, Ref} -> ok
+    after 1000 ->
+        error(collector_timeout)
+    end,
+    Acc0 = gakudan_llm_anthropic:fresh_stream_acc(),
+    {_, Pending, Acc} = lists:foldl(
+        fun(Chunk, {Subscriber, P, A}) ->
+            {NewP, NewA} = gakudan_llm_anthropic:feed_stream_chunk(Chunk, P, A, {Subscriber, Ref}),
+            {Subscriber, NewP, NewA}
+        end,
+        {Sub, <<>>, Acc0},
+        Chunks
+    ),
+    Sub ! {drain, Ref, self()},
+    receive
+        {drained, Ref, Events} ->
+            put({drained, Ref}, Events),
+            {Pending, Acc}
+    after 1000 ->
+        error(drain_timeout)
+    end.
+
+collector_loop(Parent, Ref, Acc) ->
+    receive
+        {gakudan_llm_stream, Ref, Event} ->
+            collector_loop(Parent, Ref, [Event | Acc]);
+        {drain, Ref, From} ->
+            From ! {drained, Ref, lists:reverse(Acc)}
+    end.
+
+collect_stream_events(Ref, _Timeout) ->
+    case erase({drained, Ref}) of
+        undefined -> [];
+        Events -> Events
+    end.
+
+canned_text_stream() ->
+    Events = [
+        {~"message_start", #{
+            ~"type" => ~"message_start",
+            ~"message" => #{~"usage" => #{~"input_tokens" => 8, ~"output_tokens" => 0}}
+        }},
+        {~"content_block_start", #{
+            ~"type" => ~"content_block_start",
+            ~"index" => 0,
+            ~"content_block" => #{~"type" => ~"text", ~"text" => ~""}
+        }},
+        {~"content_block_delta", #{
+            ~"type" => ~"content_block_delta",
+            ~"index" => 0,
+            ~"delta" => #{~"type" => ~"text_delta", ~"text" => ~"Hello, "}
+        }},
+        {~"content_block_delta", #{
+            ~"type" => ~"content_block_delta",
+            ~"index" => 0,
+            ~"delta" => #{~"type" => ~"text_delta", ~"text" => ~"world"}
+        }},
+        {~"content_block_delta", #{
+            ~"type" => ~"content_block_delta",
+            ~"index" => 0,
+            ~"delta" => #{~"type" => ~"text_delta", ~"text" => ~"!"}
+        }},
+        {~"content_block_stop", #{~"type" => ~"content_block_stop", ~"index" => 0}},
+        {~"message_delta", #{
+            ~"type" => ~"message_delta",
+            ~"delta" => #{~"stop_reason" => ~"end_turn"},
+            ~"usage" => #{~"output_tokens" => 5}
+        }},
+        {~"message_stop", #{~"type" => ~"message_stop"}}
+    ],
+    encode_sse(Events).
+
+canned_tool_use_stream() ->
+    Events = [
+        {~"message_start", #{
+            ~"type" => ~"message_start",
+            ~"message" => #{~"usage" => #{~"input_tokens" => 12, ~"output_tokens" => 0}}
+        }},
+        {~"content_block_start", #{
+            ~"type" => ~"content_block_start",
+            ~"index" => 0,
+            ~"content_block" => #{
+                ~"type" => ~"tool_use",
+                ~"id" => ~"toolu_abc",
+                ~"name" => ~"echo"
+            }
+        }},
+        {~"content_block_delta", #{
+            ~"type" => ~"content_block_delta",
+            ~"index" => 0,
+            ~"delta" => #{~"type" => ~"input_json_delta", ~"partial_json" => ~"{\"x\":"}
+        }},
+        {~"content_block_delta", #{
+            ~"type" => ~"content_block_delta",
+            ~"index" => 0,
+            ~"delta" => #{~"type" => ~"input_json_delta", ~"partial_json" => ~"1}"}
+        }},
+        {~"content_block_stop", #{~"type" => ~"content_block_stop", ~"index" => 0}},
+        {~"message_delta", #{
+            ~"type" => ~"message_delta",
+            ~"delta" => #{~"stop_reason" => ~"tool_use"},
+            ~"usage" => #{~"output_tokens" => 7}
+        }},
+        {~"message_stop", #{~"type" => ~"message_stop"}}
+    ],
+    encode_sse(Events).
+
+encode_sse(Events) ->
+    iolist_to_binary(
+        [
+            [<<"event: ">>, Name, <<"\ndata: ">>, json:encode(Json), <<"\n\n">>]
+         || {Name, Json} <- Events
+        ]
+    ).
