@@ -6,7 +6,7 @@
 -include_lib("kernel/include/logger.hrl").
 
 -export([start_link/2, start_link/3, send/2, status/1, stop/1, await/2, wait_ready/1]).
--export([interrupt/2, resume/2]).
+-export([interrupt/2, resume/2, cancel/1]).
 -export([callback_mode/0, init/1, handle_event/4, terminate/3]).
 
 -record(data, {
@@ -31,6 +31,7 @@
     budget = undefined :: undefined | gakudan_budget:ref(),
     used = #{tokens_in => 0, tokens_out => 0, llm_calls => 0} :: gakudan_turn:usage(),
     stopped = undefined :: undefined | term(),
+    cancelling = false :: boolean(),
     turn_workers = #{} ::
         #{
             pid() => #{
@@ -63,6 +64,10 @@ interrupt(Pid, Reason) ->
 -spec resume(pid(), term()) -> ok | {error, not_interrupted}.
 resume(Pid, Payload) ->
     gen_statem:call(Pid, {resume, Payload}).
+
+-spec cancel(pid()) -> ok.
+cancel(Pid) ->
+    gen_statem:call(Pid, cancel).
 
 -spec status(pid()) -> {ok, atom()}.
 status(Pid) ->
@@ -196,6 +201,15 @@ handle_event(info, {turn_done, Pid, Usage}, running, #data{turn_workers = TWs} =
     emit_turn_stop(Data, TW, ok, undefined),
     demonitor_worker(TW),
     finish_worker(Pid, accumulate_usage(Data, Usage));
+handle_event(info, {turn_cancelled, Pid, Usage}, running, #data{turn_workers = TWs} = Data) when
+    is_map_key(Pid, TWs)
+->
+    %% cancel/1 already set cancelling before signalling the worker; this
+    %% handler just records the worker's stop, it does not decide run-cancel.
+    TW = maps:get(Pid, TWs),
+    emit_turn_stop(Data, TW, cancelled, undefined),
+    demonitor_worker(TW),
+    finish_worker(Pid, accumulate_usage(Data, Usage));
 handle_event(info, {turn_failed, Pid, Reason}, running, #data{turn_workers = TWs} = Data) when
     is_map_key(Pid, TWs)
 ->
@@ -232,6 +246,16 @@ handle_event(info, {timeout, TRef, {await_timeout, From}}, _State, Data) ->
     NewAwaiters = lists:keydelete(TRef, 2, Data#data.awaiters),
     gen_statem:reply(From, {error, timeout}),
     {keep_state, Data#data{awaiters = NewAwaiters}};
+handle_event({call, From}, cancel, running, #data{turn_workers = TWs, cancelling = false} = Data) ->
+    maps:foreach(fun(Pid, _Info) -> Pid ! gakudan_llm_cancel end, TWs),
+    telemetry:execute(
+        [gakudan, run, cancelled],
+        #{system_time => erlang:system_time()},
+        #{run_id => Data#data.run_id}
+    ),
+    {keep_state, Data#data{cancelling = true}, [{reply, From, ok}]};
+handle_event({call, From}, cancel, _State, _Data) ->
+    {keep_state_and_data, [{reply, From, ok}]};
 handle_event({call, From}, {interrupt, Reason}, State, Data) when
     State =:= idle; State =:= running
 ->
@@ -356,20 +380,24 @@ spawn_worker(AgentId, TurnNumber, Data) ->
     emit_turn_start(RunId, AgentId, TurnNumber),
     {Pid, MonRef} = spawn_monitor(fun() ->
         try
-            {ok, Usage} = gakudan_turn:run(
-                RunId,
-                AgentId,
-                AgentMod,
-                TurnNumber,
-                Checkpointer,
-                LMod,
-                LOpts,
-                BB,
-                Stream,
-                Guardrails,
-                #{audit => Audit, actor => Actor}
-            ),
-            Self ! {turn_done, self(), Usage}
+            case
+                gakudan_turn:run(
+                    RunId,
+                    AgentId,
+                    AgentMod,
+                    TurnNumber,
+                    Checkpointer,
+                    LMod,
+                    LOpts,
+                    BB,
+                    Stream,
+                    Guardrails,
+                    #{audit => Audit, actor => Actor}
+                )
+            of
+                {ok, Usage} -> Self ! {turn_done, self(), Usage};
+                {cancelled, Usage} -> Self ! {turn_cancelled, self(), Usage}
+            end
         catch
             Class:Reason:_St ->
                 Self ! {turn_failed, self(), {Class, Reason}}
@@ -394,9 +422,15 @@ finish_worker(Pid, Data) ->
 
 fanout_complete(#data{fanout = #{base := Base, agents := Agents}} = Data) ->
     Data1 = Data#data{turn = Base + length(Agents), fanout = undefined},
-    case should_continue(Data1) of
-        true -> dispatch_next_turn(Data1);
-        false -> go_idle(Data1)
+    case Data1#data.cancelling of
+        true ->
+            {ok, _} = gakudan_blackboard:append(Data1#data.blackboard, system, ~"run cancelled"),
+            go_idle(Data1#data{cancelling = false});
+        false ->
+            case should_continue(Data1) of
+                true -> dispatch_next_turn(Data1);
+                false -> go_idle(Data1)
+            end
     end.
 
 demonitor_worker(#{mon_ref := MonRef}) ->
@@ -524,8 +558,8 @@ emit_turn_stop(Data, TW, Outcome, Reason) ->
     BaseMeta = #{run_id => Data#data.run_id, agent_id => AgentId, turn => Turn, outcome => Outcome},
     Meta =
         case Outcome of
-            ok -> BaseMeta;
-            failed -> BaseMeta#{reason => Reason}
+            failed -> BaseMeta#{reason => Reason};
+            _ -> BaseMeta
         end,
     telemetry:execute([gakudan, turn, stop], #{duration => Duration}, Meta).
 

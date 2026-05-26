@@ -18,7 +18,7 @@ gakudan:send(RunId, ~"Build a small TCP echo server in Erlang."),
 ```
 """.
 
--export([start_run/1, send/2, status/1, stop/1, await/2, interrupt/2, resume/2]).
+-export([start_run/1, send/2, status/1, stop/1, await/2, interrupt/2, resume/2, cancel/1]).
 -export([subscribe_stream/1, unsubscribe_stream/2]).
 
 -export_type([
@@ -102,6 +102,16 @@ the loop continues.
 -spec resume(run_id(), term()) -> ok | {error, not_found | not_interrupted}.
 resume(RunId, Payload) ->
     gakudan_run:resume(RunId, Payload).
+
+-doc """
+Cancel a run's in-flight generation. Any LLM stream currently running is
+stopped (the backend request is aborted), a `system` entry records the
+cancellation, and the run returns to `idle`, ready for new input. A no-op
+if nothing is in flight. See [ADR 0014](docs/adr/0014-streaming-cancellation-backpressure.md).
+""".
+-spec cancel(run_id()) -> ok | {error, not_found}.
+cancel(RunId) ->
+    gakudan_run:cancel(RunId).
 
 -doc """
 Subscribe the calling process to this run's stream channel. The

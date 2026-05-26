@@ -77,6 +77,17 @@ stream_call(Req, Opts, Subscriber) ->
             _ -> next_response(Pid)
         end,
     case Next of
+        block ->
+            %% Block until cancelled, so tests can exercise gakudan:cancel/1.
+            receive
+                gakudan_llm_cancel ->
+                    Subscriber ! {gakudan_llm_stream, Ref, {cancelled, #{}}},
+                    {error, cancelled}
+            after 5000 ->
+                Resp = render({text, ~"unblocked"}),
+                Subscriber ! {gakudan_llm_stream, Ref, {message_stop, Resp}},
+                {ok, Resp}
+            end;
         {stream_chunks, Chunks} when is_list(Chunks) ->
             lists:foreach(
                 fun(C) when is_binary(C) ->

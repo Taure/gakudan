@@ -227,6 +227,13 @@ Backends that do not implement `gakudan_llm:stream_call/3` fall back to
 uniform whether the underlying provider streams or not. Full event
 catalogue in [ADR 0005](docs/adr/0005-streaming.md).
 
+`gakudan:cancel(RunId)` stops an in-flight generation: the backend request
+is aborted, subscribers see a `{cancelled, _}` event, and the run returns to
+`idle`. The pubsub also sheds load - a subscriber whose mailbox grows past
+`stream_max_queue` (default 10000) has events dropped, with a `{dropped, N}`
+marker folded into its next delivery, so one slow consumer can't sink the
+stream. See [ADR 0014](docs/adr/0014-streaming-cancellation-backpressure.md).
+
 ## Audit logging
 
 Telemetry is best-effort; an audit sink is synchronous and recorded
