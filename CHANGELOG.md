@@ -29,8 +29,9 @@ and gakudan uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `on_error` policy of `log` or `fail_closed` decides whether a sink write
   failure halts the action. Configured per run (`audit => {Mod, Opts}`) or via
   the `default_audit` app env; a no-op when unset. `gakudan_audit_kura` is the
-  default sink (append-only rows, `actor`/`tenant` columns, per-row hash +
-  `verify/2`). See [ADR 0012](docs/adr/0012-audit-logging.md).
+  default sink (append-only rows, `actor`/`tenant` columns, per-run SHA-256
+  hash chain with serialized `FOR UPDATE` writes + chain-walking `verify/2`).
+  See [ADR 0012](docs/adr/0012-audit-logging.md).
 - **Actor attribution.** `run_config` gains an optional opaque `actor` map
   (convention `#{id, tenant}`), threaded verbatim into audit events and
   run-lifecycle telemetry metadata.
