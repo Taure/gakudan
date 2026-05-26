@@ -9,6 +9,20 @@ and gakudan uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Audit logging.** New `gakudan_audit` behaviour: a synchronous,
+  recorded-before-the-action sink for must-not-lose events, distinct from
+  best-effort telemetry. Covers `run_started`, `run_resumed`,
+  `run_interrupted`, `run_stopped`, and every guardrail decision
+  (`guardrail_allow` / `guardrail_transform` / `guardrail_block`). An
+  `on_error` policy of `log` or `fail_closed` decides whether a sink write
+  failure halts the action. Configured per run (`audit => {Mod, Opts}`) or via
+  the `default_audit` app env; a no-op when unset. `gakudan_audit_kura` is the
+  default sink (append-only rows, `actor`/`tenant` columns, per-row hash +
+  `verify/2`). See [ADR 0012](docs/adr/0012-audit-logging.md).
+- **Actor attribution.** `run_config` gains an optional opaque `actor` map
+  (convention `#{id, tenant}`), threaded verbatim into audit events and
+  run-lifecycle telemetry metadata.
+
 - **MCP client.** New `gakudan_mcp_client` gen_server speaks the
   Streamable HTTP transport of the Model Context Protocol. One process
   per remote MCP endpoint; performs the `initialize` handshake on

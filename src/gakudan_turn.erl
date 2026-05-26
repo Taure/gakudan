@@ -1,9 +1,11 @@
 -module(gakudan_turn).
 -moduledoc false.
 
--export([run/10]).
+-export([run/10, run/11]).
 
 -define(MAX_TOOL_ITERATIONS, 10).
+
+-type audit_ctx() :: #{audit => gakudan_audit:handle(), actor => map()}.
 
 -spec run(
     gakudan:run_id(),
@@ -18,6 +20,46 @@
     [gakudan_guardrail:ref()]
 ) -> ok.
 run(RunId, AgentId, AgentMod, Turn, Checkpointer, LlmMod, LlmOpts, Blackboard, Stream, Guardrails) ->
+    run(
+        RunId,
+        AgentId,
+        AgentMod,
+        Turn,
+        Checkpointer,
+        LlmMod,
+        LlmOpts,
+        Blackboard,
+        Stream,
+        Guardrails,
+        #{}
+    ).
+
+-spec run(
+    gakudan:run_id(),
+    gakudan_agent:id(),
+    module(),
+    pos_integer(),
+    undefined | {module(), term()},
+    module(),
+    map(),
+    pid(),
+    undefined | pid(),
+    [gakudan_guardrail:ref()],
+    audit_ctx()
+) -> ok.
+run(
+    RunId,
+    AgentId,
+    AgentMod,
+    Turn,
+    Checkpointer,
+    LlmMod,
+    LlmOpts,
+    Blackboard,
+    Stream,
+    Guardrails,
+    AuditCtx
+) ->
     System = AgentMod:system_prompt(),
     ResolvedTools = gakudan_tool:resolve(AgentMod:tools()),
     Specs = [maps:get(spec, R) || R <- ResolvedTools],
@@ -38,7 +80,9 @@ run(RunId, AgentId, AgentMod, Turn, Checkpointer, LlmMod, LlmOpts, Blackboard, S
         llm_opts => LlmOpts,
         bb => Blackboard,
         stream => Stream,
-        guardrails => Guardrails
+        guardrails => Guardrails,
+        audit => maps:get(audit, AuditCtx, undefined),
+        actor => maps:get(actor, AuditCtx, #{})
     },
     loop(Ctx, Messages, 0).
 
@@ -88,8 +132,38 @@ guard(Ctx, Stage, Payload) ->
                 agent_id => maps:get(agent_id, Ctx),
                 turn => maps:get(turn, Ctx)
             },
-            gakudan_guardrail:run(Guardrails, Stage, Payload, Base)
+            case gakudan_guardrail:run(Guardrails, Stage, Payload, Base) of
+                {ok, NewPayload, Trail} ->
+                    audit_trail(Ctx, Stage, Trail),
+                    {ok, NewPayload};
+                {block, {Mod, Reason} = Block, Trail} ->
+                    audit_trail(Ctx, Stage, Trail),
+                    audit_guardrail(Ctx, Stage, guardrail_block, Mod, #{reason => Reason}),
+                    {block, Block}
+            end
     end.
+
+audit_trail(Ctx, Stage, Trail) ->
+    lists:foreach(
+        fun({Mod, Decision}) ->
+            audit_guardrail(Ctx, Stage, decision_type(Decision), Mod, #{})
+        end,
+        Trail
+    ).
+
+decision_type(allow) -> guardrail_allow;
+decision_type(transform) -> guardrail_transform.
+
+audit_guardrail(Ctx, Stage, Type, Mod, Extra) ->
+    Base = #{
+        run_id => maps:get(run_id, Ctx),
+        agent_id => maps:get(agent_id, Ctx),
+        turn => maps:get(turn, Ctx),
+        actor => maps:get(actor, Ctx, #{})
+    },
+    Detail = maps:merge(#{guardrail => Mod, stage => Stage}, Extra),
+    Event = gakudan_audit:event(Type, Base, Detail),
+    gakudan_audit:record(maps:get(audit, Ctx, undefined), Event).
 
 append_block(Ctx, Stage, {Mod, Reason}) ->
     #{run_id := RunId, agent_id := AgentId, turn := Turn, bb := BB} = Ctx,

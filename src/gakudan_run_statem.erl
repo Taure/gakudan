@@ -24,6 +24,8 @@
     turn = 0 :: non_neg_integer(),
     last_step = 0 :: non_neg_integer(),
     checkpointer :: undefined | {module(), term()},
+    audit = undefined :: gakudan_audit:handle(),
+    actor = #{} :: map(),
     turn_workers = #{} ::
         #{
             pid() => #{
@@ -98,6 +100,8 @@ init({fresh, RunSup, Config}) ->
         llm_opts = LOpts,
         max_turns = MaxTurns,
         checkpointer = Checkpointer,
+        audit = init_audit(Config),
+        actor = maps:get(actor, Config, #{}),
         start_time = erlang:monotonic_time()
     },
     {ok, initialising, Data, [{next_event, internal, finish_init}]};
@@ -132,6 +136,8 @@ init({resume, RunSup, Config, Snapshot}) ->
         last_step = LastStep,
         fanout = maps:get(fanout, Snapshot, undefined),
         checkpointer = Checkpointer,
+        audit = init_audit(Config),
+        actor = maps:get(actor, Config, #{}),
         start_time = erlang:monotonic_time()
     },
     Restore = #{
@@ -150,10 +156,12 @@ handle_event(internal, finish_init, initialising, Data) ->
             %% supervised restart, so rehydrate instead of starting fresh.
             Data2 = rehydrate(Data1, Snapshot),
             emit_run_start(Data2),
+            emit_audit(Data2, run_resumed, #{mode => supervised, origin => init}),
             enter_resumed(maps:get(statem_state, Snapshot), Data2);
         none ->
             Data2 = append_initial_messages(Data1),
             emit_run_start(Data2),
+            emit_audit(Data2, run_started, #{mode => fresh}),
             save_snapshot(idle, Data2),
             {next_state, idle, Data2}
     end;
@@ -161,6 +169,7 @@ handle_event(internal, {finish_resume, PriorState, Restore}, initialising, Data)
     Data1 = register_children(Data),
     ok = gakudan_blackboard:restore(Data1#data.blackboard, Restore),
     emit_run_start(Data1),
+    emit_audit(Data1, run_resumed, #{mode => supervised, origin => resume_event}),
     enter_resumed(PriorState, Data1);
 handle_event(enter, _Old, idle, Data) ->
     notify_awaiters(Data#data.awaiters, Data#data.blackboard),
@@ -222,6 +231,7 @@ handle_event({call, From}, {interrupt, Reason}, State, Data) when
     Body = interrupt_body(Reason),
     {ok, _} = gakudan_blackboard:append(Data#data.blackboard, system, Body),
     save_snapshot(awaiting_human, Data),
+    emit_audit(Data, run_interrupted, #{reason => Reason}),
     {next_state, awaiting_human, Data, [{reply, From, ok}]};
 handle_event({call, From}, {interrupt, _Reason}, _State, _Data) ->
     {keep_state_and_data, [{reply, From, {error, not_interruptible}}]};
@@ -229,6 +239,7 @@ handle_event({call, From}, {resume, Payload}, awaiting_human, Data) ->
     Body = resume_body(Payload),
     {ok, _} = gakudan_blackboard:append(Data#data.blackboard, user, Body),
     save_snapshot(running, Data),
+    emit_audit(Data, run_resumed, resume_detail(Payload)),
     {keep_state_and_data, [{reply, From, ok}, {next_event, internal, dispatch_after_resume}]};
 handle_event({call, From}, {resume, _Payload}, _State, _Data) ->
     {keep_state_and_data, [{reply, From, {error, not_interrupted}}]};
@@ -248,6 +259,7 @@ terminate(Reason, State, Data) ->
         {_, _} -> save_snapshot({error, Reason}, Data)
     end,
     emit_run_stop(Data, Reason),
+    emit_audit_best_effort(Data, run_stopped, #{reason => Reason}),
     gakudan_registry:unregister(Data#data.run_id),
     ok.
 
@@ -314,7 +326,9 @@ spawn_worker(AgentId, TurnNumber, Data) ->
         blackboard = BB,
         stream = Stream,
         checkpointer = Checkpointer,
-        guardrails = Guardrails
+        guardrails = Guardrails,
+        audit = Audit,
+        actor = Actor
     } = Data,
     {AgentMod, _AgentOpts} = maps:get(AgentId, Agents),
     Self = self(),
@@ -332,7 +346,8 @@ spawn_worker(AgentId, TurnNumber, Data) ->
                 LOpts,
                 BB,
                 Stream,
-                Guardrails
+                Guardrails,
+                #{audit => Audit, actor => Actor}
             ),
             Self ! {turn_done, self()}
         catch
@@ -509,6 +524,35 @@ init_checkpointer(Config) ->
                 {error, Reason} -> error({checkpointer_init_failed, Mod, Reason})
             end
     end.
+
+init_audit(Config) ->
+    Spec =
+        case maps:get(audit, Config, undefined) of
+            undefined -> application:get_env(gakudan, default_audit, undefined);
+            S -> S
+        end,
+    gakudan_audit:init(Spec).
+
+emit_audit(Data, Type, Detail) ->
+    emit_audit(Data, Type, Detail, Data#data.audit).
+
+%% terminate has no action left to gate, so the stop event is always
+%% best-effort: a fail_closed sink must never turn a clean stop into a crash.
+emit_audit_best_effort(Data, Type, Detail) ->
+    emit_audit(Data, Type, Detail, force_log(Data#data.audit)).
+
+emit_audit(Data, Type, Detail, Audit) ->
+    Base = #{run_id => Data#data.run_id, actor => Data#data.actor},
+    Event = gakudan_audit:event(Type, Base, Detail),
+    gakudan_audit:record(Audit, Event).
+
+force_log(undefined) -> undefined;
+force_log(Audit) -> Audit#{on_error => log}.
+
+resume_detail(Payload) when is_binary(Payload) ->
+    #{mode => human, payload_bytes => byte_size(Payload)};
+resume_detail(_Payload) ->
+    #{mode => human}.
 
 append_initial_messages(#data{config = Config, blackboard = BB} = Data) ->
     Initial = maps:get(initial_messages, Config, []),
