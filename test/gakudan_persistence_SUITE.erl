@@ -11,7 +11,8 @@
     snapshot_persists_through_lifecycle/1,
     tool_result_round_trip/1,
     tool_not_re_executed_on_replay/1,
-    supervised_restart_restores_run/1
+    supervised_restart_restores_run/1,
+    auto_continues_running_fanout_on_resume/1
 ]).
 
 all() ->
@@ -24,7 +25,8 @@ all() ->
         snapshot_persists_through_lifecycle,
         tool_result_round_trip,
         tool_not_re_executed_on_replay,
-        supervised_restart_restores_run
+        supervised_restart_restores_run,
+        auto_continues_running_fanout_on_resume
     ].
 
 init_per_suite(Config) ->
@@ -235,6 +237,44 @@ supervised_restart_restores_run(_Config) ->
     After = length(gakudan_blackboard:entries(BB1)),
     true = After >= Before,
 
+    ok = gakudan:stop(RunId),
+    gen_server:stop(Script).
+
+auto_continues_running_fanout_on_resume(_Config) ->
+    {ok, Script} = gakudan_llm_stub_script:start_link([{text, ~"resumed-output"}]),
+    RunId = ~"run-autocont",
+    Config = #{
+        run_id => RunId,
+        agents => [agent_a_mod, agent_b_mod],
+        router => {gakudan_router_round_robin, #{}},
+        llm => {gakudan_llm_stub, #{script_owner => Script}},
+        max_turns => 4
+    },
+    %% A snapshot captured mid-fanout: agent_a was dispatched as turn 1 but
+    %% never finished, and the router state is already past that decision.
+    {ok, R0} = gakudan_router_round_robin:init(#{}, [agent_a, agent_b]),
+    {next, agent_a, R1} = gakudan_router_round_robin:next(R0, []),
+    Snapshot = #{
+        run_id => RunId,
+        status => running,
+        config => Config,
+        last_step => 0,
+        blackboard => [#{seq => 1, role => user, content => ~"go", ts => 0}],
+        kv => #{},
+        router_state => R1,
+        statem_state => running,
+        turn => 0,
+        fanout => #{base => 0, agents => [agent_a]},
+        updated_at => erlang:system_time(millisecond)
+    },
+    {ok, _Sup, RunId} = gakudan_runs_sup:resume_run(Config, Snapshot),
+    {ok, Entries} = gakudan:await(RunId, 5000),
+    %% The in-flight fanout re-ran: agent_a produced its output after resume.
+    AgentAOutputs = [
+        maps:get(content, E)
+     || E <- Entries, maps:get(role, E) =:= {agent, agent_a}
+    ],
+    true = lists:member(~"resumed-output", AgentAOutputs),
     ok = gakudan:stop(RunId),
     gen_server:stop(Script).
 

@@ -53,6 +53,7 @@ Two collections live in this contract:
     router_state := term(),
     statem_state := atom(),
     turn := non_neg_integer(),
+    fanout => undefined | #{base := non_neg_integer(), agents := [atom()]},
     updated_at := integer()
 }.
 
