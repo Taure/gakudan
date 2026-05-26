@@ -6,7 +6,8 @@
     starts_and_stops/1,
     round_robin_two_agents/1,
     handoff_stops_when_no_token/1,
-    handoff_follows_agent_mention/1
+    handoff_follows_agent_mention/1,
+    fanout_runs_all_agents/1
 ]).
 
 all() ->
@@ -14,7 +15,8 @@ all() ->
         starts_and_stops,
         round_robin_two_agents,
         handoff_stops_when_no_token,
-        handoff_follows_agent_mention
+        handoff_follows_agent_mention,
+        fanout_runs_all_agents
     ].
 
 init_per_suite(Config) ->
@@ -71,11 +73,25 @@ handoff_follows_agent_mention(_Config) ->
     ok = gakudan:stop(RunId),
     gen_server:stop(Script).
 
+fanout_runs_all_agents(_Config) ->
+    {ok, Script} = gakudan_llm_stub_script:start_link([
+        {text, ~"reply one"},
+        {text, ~"reply two"}
+    ]),
+    {ok, _Sup, RunId} = start_run(fanout, Script),
+    ok = gakudan:send(RunId, ~"start"),
+    {ok, Entries} = gakudan:await(RunId, 5000),
+    AgentRoles = lists:sort([R || #{role := {agent, _} = R} <- Entries]),
+    [{agent, agent_a}, {agent, agent_b}] = AgentRoles,
+    ok = gakudan:stop(RunId),
+    gen_server:stop(Script).
+
 start_run(Routing, Script) ->
     Router =
         case Routing of
             round_robin -> {gakudan_router_round_robin, #{}};
-            handoff_from_a -> {gakudan_router_handoff, #{start => agent_a}}
+            handoff_from_a -> {gakudan_router_handoff, #{start => agent_a}};
+            fanout -> {gakudan_router_fanout, #{}}
         end,
     gakudan:start_run(#{
         agents => [agent_a_mod, agent_b_mod],

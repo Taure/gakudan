@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/Taure/gakudan/actions/workflows/ci.yml/badge.svg)](https://github.com/Taure/gakudan/actions/workflows/ci.yml)
 [![License](https://img.shields.io/github/license/Taure/gakudan)](LICENSE)
-[![Erlang](https://img.shields.io/badge/erlang-28%2B-blue)](.tool-versions)
+[![Erlang](https://img.shields.io/badge/erlang-29%2B-blue)](.tool-versions)
 
 Multi-agent collaboration primitives for the BEAM.
 
