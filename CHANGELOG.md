@@ -9,6 +9,14 @@ and gakudan uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **OAuth 2.1 for the MCP client.** `gakudan_mcp_client` auth gains
+  `{oauth2, #{token_url, client_id, client_secret, scope}}` - the OAuth 2.1
+  client-credentials grant for OAuth-gated MCP servers. The access token is
+  fetched from `token_url`, cached with its expiry, refreshed when it lapses,
+  and a `401` triggers a one-shot refetch-and-retry. The bearer header path is
+  unchanged. Authorization-code/PKCE is out of scope for a headless client.
+  See [ADR 0015](docs/adr/0015-mcp-oauth.md).
+
 - **Streaming cancellation + load-shedding.** New `gakudan:cancel/1` stops a
   run's in-flight generation: the backend `httpc` request is aborted
   (`gakudan_llm_cancel` reaches the worker's `stream_loop`), subscribers get a
