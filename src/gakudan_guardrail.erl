@@ -17,7 +17,7 @@ See [ADR 0010](docs/adr/0010-guardrails.md).
 
 -export([run/4, resolve/1]).
 
--export_type([ref/0, stage/0, context/0, result/0]).
+-export_type([ref/0, stage/0, context/0, result/0, decision/0, trail/0]).
 
 -type ref() :: module() | {module(), Opts :: map()}.
 -type stage() :: input | output.
@@ -29,6 +29,8 @@ See [ADR 0010](docs/adr/0010-guardrails.md).
     opts := map()
 }.
 -type result() :: allow | {block, Reason :: term()} | {transform, NewPayload :: term()}.
+-type decision() :: allow | transform.
+-type trail() :: [{module(), decision()}].
 
 -doc """
 Inspect `Payload` at `Stage`. `allow` passes it through, `{block, R}`
@@ -37,20 +39,30 @@ rejects it, `{transform, P}` rewrites it for the rest of the chain.
 -callback check(stage(), Payload :: term(), context()) -> result().
 
 -doc """
-Run a guardrail chain over `Payload`. Returns `{ok, FinalPayload}` (after
-any transforms) or `{block, {Module, Reason}}` at the first block.
-`Base` supplies the non-stage context fields (`run_id`, `agent_id`, `turn`).
+Run a guardrail chain over `Payload`. Returns `{ok, FinalPayload, Trail}`
+(after any transforms) or `{block, {Module, Reason}, Trail}` at the first
+block. The `Trail` lists each guardrail's decision (`allow` or `transform`,
+plus the blocking module) in order, for the audit record - it never carries
+payloads. `Base` supplies the non-stage context fields (`run_id`,
+`agent_id`, `turn`).
 """.
--spec run([ref()], stage(), term(), map()) -> {ok, term()} | {block, {module(), term()}}.
-run([], _Stage, Payload, _Base) ->
-    {ok, Payload};
-run([Ref | Rest], Stage, Payload, Base) ->
+-spec run([ref()], stage(), term(), map()) ->
+    {ok, term(), trail()} | {block, {module(), term()}, trail()}.
+run(Refs, Stage, Payload, Base) ->
+    run(Refs, Stage, Payload, Base, []).
+
+run([], _Stage, Payload, _Base, Trail) ->
+    {ok, Payload, lists:reverse(Trail)};
+run([Ref | Rest], Stage, Payload, Base, Trail) ->
     {Mod, Opts} = resolve(Ref),
     Context = Base#{stage => Stage, opts => Opts},
     case Mod:check(Stage, Payload, Context) of
-        allow -> run(Rest, Stage, Payload, Base);
-        {transform, NewPayload} -> run(Rest, Stage, NewPayload, Base);
-        {block, Reason} -> {block, {Mod, Reason}}
+        allow ->
+            run(Rest, Stage, Payload, Base, [{Mod, allow} | Trail]);
+        {transform, NewPayload} ->
+            run(Rest, Stage, NewPayload, Base, [{Mod, transform} | Trail]);
+        {block, Reason} ->
+            {block, {Mod, Reason}, lists:reverse(Trail)}
     end.
 
 -doc "Normalise a guardrail ref into `{Module, Opts}`.".

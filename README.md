@@ -76,7 +76,9 @@ Swap in `planner_coder:run_stub()` for a two-agent handoff with a tool call.
 | Router | `gakudan_router` | `round_robin`, `handoff`, `manager` | Decides whose turn is next. |
 | Blackboard | (private) | gen_server + ETS | Append-only transcript with subscriber pub/sub. |
 | Tool | `gakudan_tool` | bring your own | JSON schema + `run/1` callback. |
-| LLM backend | `gakudan_llm` | `anthropic`, `gemini`, `stub` | One callback: `complete(req, opts) -> response`. |
+| LLM backend | `gakudan_llm` | `anthropic`, `gemini`, `vertex`, `stub` | One callback: `complete(req, opts) -> response`. |
+| Guardrail | `gakudan_guardrail` | bring your own | Allow / block / transform at the LLM boundary. |
+| Audit sink | `gakudan_audit` | `kura` | Durable, synchronous record of lifecycle + policy events. |
 
 ## Writing a custom router
 
@@ -225,6 +227,31 @@ Backends that do not implement `gakudan_llm:stream_call/3` fall back to
 uniform whether the underlying provider streams or not. Full event
 catalogue in [ADR 0005](docs/adr/0005-streaming.md).
 
+## Audit logging
+
+Telemetry is best-effort; an audit sink is synchronous and recorded
+before the action proceeds, so a regulated operator has a durable record
+of *who* started a run, *which* policy decisions fired, and *when* a human
+intervened. Configure a sink and attach an actor:
+
+```erlang
+{ok, _Pid, RunId} = gakudan:start_run(#{
+    agents => [...], router => ..., llm => ...,
+    actor => #{id => ~"u_123", tenant => ~"team_payments"},
+    audit => {gakudan_audit_kura, #{repo => my_repo, on_error => fail_closed}}
+}).
+```
+
+The default `gakudan_audit_kura` sink writes one append-only row per event
+(any kura backend), lifting `actor.id` and `actor.tenant` into their own
+columns and hashing each row for tamper detection. Events covered:
+`run_started`, `run_resumed`, `run_interrupted`, `run_stopped`, and every
+guardrail decision (`guardrail_allow` / `guardrail_transform` /
+`guardrail_block`). `on_error` is `log` (warn and continue) or
+`fail_closed` (halt rather than lose a record). With no sink configured
+audit is a no-op. Bring your own sink by implementing the `gakudan_audit`
+behaviour. Full design in [ADR 0012](docs/adr/0012-audit-logging.md).
+
 ## Companion libraries
 
 | Library | What it adds |
@@ -234,8 +261,10 @@ catalogue in [ADR 0005](docs/adr/0005-streaming.md).
 
 ## Status
 
-v0.2 - single-node persistence via checkpointer behaviour; human-in-the-loop
-interrupt / resume. No multi-node distribution, no streaming responses yet.
+Single-node. Shipped: persistence via the checkpointer behaviour,
+human-in-the-loop interrupt / resume, token-level streaming, parallel agent
+fanout, an MCP client, pluggable guardrails, and synchronous audit logging.
+No multi-node distribution (out of scope by design).
 
 ## Why "gakudan"?
 

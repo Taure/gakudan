@@ -28,6 +28,8 @@ gakudan:send(RunId, ~"Build a small TCP echo server in Erlang."),
     router_spec/0,
     llm_spec/0,
     checkpointer_spec/0,
+    audit_spec/0,
+    actor/0,
     initial_message/0
 ]).
 
@@ -36,6 +38,8 @@ gakudan:send(RunId, ~"Build a small TCP echo server in Erlang."),
 -type router_spec() :: {module(), Opts :: map()}.
 -type llm_spec() :: {module(), Opts :: map()}.
 -type checkpointer_spec() :: {module(), Opts :: map()}.
+-type audit_spec() :: {module(), Opts :: map()}.
+-type actor() :: map().
 -type initial_message() :: #{role := system | user, content := binary()}.
 
 -type run_config() :: #{
@@ -45,6 +49,8 @@ gakudan:send(RunId, ~"Build a small TCP echo server in Erlang."),
     llm := llm_spec(),
     max_turns => pos_integer(),
     checkpointer => checkpointer_spec(),
+    audit => audit_spec(),
+    actor => actor(),
     guardrails => [gakudan_guardrail:ref()],
     initial_messages => [initial_message()]
 }.
