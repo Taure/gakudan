@@ -9,6 +9,18 @@ and gakudan uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Cost budgets.** New `gakudan_budget` behaviour: a budget is checked
+  before each turn is dispatched and stops the run before it spends past a
+  ceiling. Built-in `gakudan_budget_limit` covers the universal caps
+  (`max_tokens`, `max_input_tokens`, `max_output_tokens`, `max_llm_calls`,
+  `max_turns`); money and per-tenant policy are expressible by implementing
+  `check/2`. On a breach the run stops gracefully with reason
+  `{budget_exceeded, {Mod, Reason}}`, records a `system` entry, and emits a
+  `[gakudan, budget, exceeded]` telemetry event. Configured per run
+  (`budget => Ref`) or via the `default_budget` app env; a no-op when unset.
+  The cumulative counter is in-memory and resets on a supervised restart. See
+  [ADR 0013](docs/adr/0013-cost-budgets.md).
+
 - **Audit logging.** New `gakudan_audit` behaviour: a synchronous,
   recorded-before-the-action sink for must-not-lose events, distinct from
   best-effort telemetry. Covers `run_started`, `run_resumed`,

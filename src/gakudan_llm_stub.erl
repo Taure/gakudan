@@ -5,6 +5,8 @@ Deterministic LLM stub for tests and offline demos.
 Opts:
 - `script := [response()]` - dequeued per call; if exhausted, returns `end_turn`
   with empty text.
+- `usage := #{input_tokens => N, output_tokens => M}` - attached to every
+  response, so tests can drive token-based logic (budgets) deterministically.
 
 A `response()` is `{text, binary()}` or `{tool_use, Name, Input}` or
 `{multi, [content_block()]}` for mixing.
@@ -21,7 +23,10 @@ complete(_Req, Opts) ->
             undefined -> {text, ~""};
             _ -> next_response(Pid)
         end,
-    {ok, render(Next)}.
+    {ok, attach_usage(render(Next), Opts)}.
+
+attach_usage(Resp, #{usage := U}) when is_map(U) -> Resp#{usage => U};
+attach_usage(Resp, _Opts) -> Resp.
 
 render({text, T}) ->
     #{stop_reason => end_turn, content => [#{type => text, text => T}]};
@@ -80,11 +85,11 @@ stream_call(Req, Opts, Subscriber) ->
                 Chunks
             ),
             Full = iolist_to_binary(Chunks),
-            Resp = render({text, Full}),
+            Resp = attach_usage(render({text, Full}), Opts),
             Subscriber ! {gakudan_llm_stream, Ref, {message_stop, Resp}},
             {ok, Resp};
         Other ->
-            Resp = render(Other),
+            Resp = attach_usage(render(Other), Opts),
             forward_synthetic(Subscriber, Ref, Resp),
             Subscriber ! {gakudan_llm_stream, Ref, {message_stop, Resp}},
             {ok, Resp}

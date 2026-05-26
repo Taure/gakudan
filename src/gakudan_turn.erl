@@ -6,6 +6,13 @@
 -define(MAX_TOOL_ITERATIONS, 10).
 
 -type audit_ctx() :: #{audit => gakudan_audit:handle(), actor => map()}.
+-type usage() :: #{
+    tokens_in := non_neg_integer(),
+    tokens_out := non_neg_integer(),
+    llm_calls := non_neg_integer()
+}.
+
+-export_type([usage/0]).
 
 -spec run(
     gakudan:run_id(),
@@ -20,7 +27,7 @@
     [gakudan_guardrail:ref()]
 ) -> ok.
 run(RunId, AgentId, AgentMod, Turn, Checkpointer, LlmMod, LlmOpts, Blackboard, Stream, Guardrails) ->
-    run(
+    {ok, _Usage} = run(
         RunId,
         AgentId,
         AgentMod,
@@ -32,7 +39,8 @@ run(RunId, AgentId, AgentMod, Turn, Checkpointer, LlmMod, LlmOpts, Blackboard, S
         Stream,
         Guardrails,
         #{}
-    ).
+    ),
+    ok.
 
 -spec run(
     gakudan:run_id(),
@@ -46,7 +54,7 @@ run(RunId, AgentId, AgentMod, Turn, Checkpointer, LlmMod, LlmOpts, Blackboard, S
     undefined | pid(),
     [gakudan_guardrail:ref()],
     audit_ctx()
-) -> ok.
+) -> {ok, usage()}.
 run(
     RunId,
     AgentId,
@@ -86,9 +94,12 @@ run(
     },
     loop(Ctx, Messages, 0).
 
-loop(_Ctx, _Msgs, N) when N >= ?MAX_TOOL_ITERATIONS ->
-    ok;
 loop(Ctx, Msgs, N) ->
+    loop(Ctx, Msgs, N, #{tokens_in => 0, tokens_out => 0, llm_calls => 0}).
+
+loop(_Ctx, _Msgs, N, Usage) when N >= ?MAX_TOOL_ITERATIONS ->
+    {ok, Usage};
+loop(Ctx, Msgs, N, Usage) ->
     #{
         agent_id := AgentId,
         sys := Sys,
@@ -99,28 +110,44 @@ loop(Ctx, Msgs, N) ->
     } = Ctx,
     case guard(Ctx, input, Msgs) of
         {block, Block} ->
-            append_block(Ctx, input, Block);
+            append_block(Ctx, input, Block),
+            {ok, Usage};
         {ok, GuardedMsgs} ->
             Req = #{model => Model, system => Sys, tools => Tools, messages => GuardedMsgs},
             case complete_with_idempotency(Ctx, N, Req) of
-                {ok, #{stop_reason := end_turn, content := Content}} ->
+                {ok, #{stop_reason := end_turn, content := Content} = Resp} ->
+                    Usage1 = add_usage(Usage, Resp),
                     case guard(Ctx, output, collect_text(Content)) of
                         {block, Block} ->
-                            append_block(Ctx, output, Block);
+                            append_block(Ctx, output, Block),
+                            {ok, Usage1};
                         {ok, Text} ->
                             {ok, _} = gakudan_blackboard:append(BB, {agent, AgentId}, Text),
-                            ok
+                            {ok, Usage1}
                     end;
-                {ok, #{stop_reason := tool_use, content := Content}} ->
+                {ok, #{stop_reason := tool_use, content := Content} = Resp} ->
+                    Usage1 = add_usage(Usage, Resp),
                     ToolUses = [B || #{type := tool_use} = B <- Content],
                     ToolResults = run_tools(Ctx, N, ResolvedTools, ToolUses),
                     AssistantTurn = #{role => assistant, content => Content},
                     UserTurn = #{role => user, content => ToolResults},
-                    loop(Ctx, Msgs ++ [AssistantTurn, UserTurn], N + 1);
+                    loop(Ctx, Msgs ++ [AssistantTurn, UserTurn], N + 1, Usage1);
                 {error, Reason} ->
                     error({llm_error, Reason})
             end
     end.
+
+add_usage(Usage, Resp) ->
+    U = maps:get(usage, Resp, #{}),
+    In =
+        maps:get(input_tokens, U, 0) +
+            maps:get(cache_read_input_tokens, U, 0) +
+            maps:get(cache_creation_input_tokens, U, 0),
+    #{
+        tokens_in => maps:get(tokens_in, Usage) + In,
+        tokens_out => maps:get(tokens_out, Usage) + maps:get(output_tokens, U, 0),
+        llm_calls => maps:get(llm_calls, Usage) + 1
+    }.
 
 guard(Ctx, Stage, Payload) ->
     case maps:get(guardrails, Ctx, []) of

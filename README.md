@@ -252,6 +252,28 @@ guardrail decision (`guardrail_allow` / `guardrail_transform` /
 audit is a no-op. Bring your own sink by implementing the `gakudan_audit`
 behaviour. Full design in [ADR 0012](docs/adr/0012-audit-logging.md).
 
+## Cost budgets
+
+Token telemetry makes spend observable; a budget makes it *enforceable*. A
+budget is checked before each turn is dispatched and stops the run before it
+spends past a ceiling:
+
+```erlang
+{ok, _Pid, RunId} = gakudan:start_run(#{
+    agents => [...], router => ..., llm => ...,
+    budget => {gakudan_budget_limit, #{max_tokens => 100000, max_llm_calls => 50}}
+}).
+```
+
+The built-in `gakudan_budget_limit` covers the universal caps -
+`max_tokens`, `max_input_tokens`, `max_output_tokens`, `max_llm_calls`,
+`max_turns`. On a breach the run stops with reason
+`{budget_exceeded, {Mod, Reason}}` (graceful), records a `system` entry, and
+emits a `[gakudan, budget, exceeded]` telemetry event. Money and per-tenant
+caps are yours - implement the `gakudan_budget` behaviour's `check/2` against
+your own price table or counters. With no budget configured it is a no-op.
+See [ADR 0013](docs/adr/0013-cost-budgets.md).
+
 ## Companion libraries
 
 | Library | What it adds |
