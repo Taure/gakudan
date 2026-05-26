@@ -59,8 +59,7 @@ loop(Ctx, Msgs, N) ->
             ok;
         {ok, #{stop_reason := tool_use, content := Content}} ->
             ToolUses = [B || #{type := tool_use} = B <- Content],
-            #{run_id := RunId, turn := Turn} = Ctx,
-            ToolResults = run_tools(RunId, AgentId, Turn, ResolvedTools, ToolUses),
+            ToolResults = run_tools(Ctx, N, ResolvedTools, ToolUses),
             AssistantTurn = #{role => assistant, content => Content},
             UserTurn = #{role => user, content => ToolResults},
             loop(Ctx, Msgs ++ [AssistantTurn, UserTurn], N + 1);
@@ -254,7 +253,7 @@ collect_text(Content) ->
     Texts = [T || #{type := text, text := T} <- Content],
     iolist_to_binary(lists:join(~"\n", Texts)).
 
-run_tools(RunId, AgentId, Turn, ResolvedTools, ToolUses) ->
+run_tools(Ctx, Iter, ResolvedTools, ToolUses) ->
     NameMap = maps:from_list([
         {maps:get(name, maps:get(spec, R)), R}
      || R <- ResolvedTools
@@ -262,22 +261,8 @@ run_tools(RunId, AgentId, Turn, ResolvedTools, ToolUses) ->
     lists:map(
         fun(#{id := Id, name := Name, input := Input}) ->
             case maps:find(Name, NameMap) of
-                {ok, #{run := RunFun}} ->
-                    case run_tool_with_telemetry(RunId, AgentId, Turn, Name, RunFun, Input) of
-                        {ok, Output} ->
-                            #{
-                                type => tool_result,
-                                tool_use_id => Id,
-                                content => to_text(Output)
-                            };
-                        {error, Reason} ->
-                            #{
-                                type => tool_result,
-                                tool_use_id => Id,
-                                is_error => true,
-                                content => iolist_to_binary(io_lib:format("error: ~p", [Reason]))
-                            }
-                    end;
+                {ok, Resolved} ->
+                    tool_result_block(Id, run_one_tool(Ctx, Iter, Id, Name, Resolved, Input));
                 error ->
                     #{
                         type => tool_result,
@@ -289,6 +274,77 @@ run_tools(RunId, AgentId, Turn, ResolvedTools, ToolUses) ->
         end,
         ToolUses
     ).
+
+%% Run a single tool, caching its result under a deterministic key so a
+%% resumed turn replays the result instead of re-running the tool (ADR
+%% 0009). Errors are not cached: a failed tool retries on resume.
+run_one_tool(Ctx, Iter, ToolUseId, Name, #{run := RunFun, idempotent := Idempotent}, Input) ->
+    #{
+        run_id := RunId,
+        agent_id := AgentId,
+        turn := Turn,
+        checkpointer := Checkpointer
+    } = Ctx,
+    case cacheable(Checkpointer, Idempotent) of
+        false ->
+            run_tool_with_telemetry(RunId, AgentId, Turn, Name, RunFun, Input);
+        true ->
+            ToolStepId = tool_step_id(RunId, Turn, AgentId, Iter, ToolUseId),
+            case gakudan_checkpointer:load_tool_result(Checkpointer, RunId, ToolStepId) of
+                {ok, #{output := Cached}} ->
+                    {ok, Cached};
+                {error, not_found} ->
+                    case run_tool_with_telemetry(RunId, AgentId, Turn, Name, RunFun, Input) of
+                        {ok, Output} = Ok ->
+                            persist_tool_result(
+                                Checkpointer, RunId, ToolStepId, AgentId, Turn, Name, Output
+                            ),
+                            Ok;
+                        {error, _} = Err ->
+                            Err
+                    end
+            end
+    end.
+
+cacheable(undefined, _Idempotent) -> false;
+cacheable(_Checkpointer, Idempotent) -> Idempotent.
+
+tool_result_block(Id, {ok, Output}) ->
+    #{type => tool_result, tool_use_id => Id, content => to_text(Output)};
+tool_result_block(Id, {error, Reason}) ->
+    #{
+        type => tool_result,
+        tool_use_id => Id,
+        is_error => true,
+        content => iolist_to_binary(io_lib:format("error: ~p", [Reason]))
+    }.
+
+tool_step_id(RunId, Turn, AgentId, Iter, ToolUseId) ->
+    Input = iolist_to_binary([
+        RunId,
+        $|,
+        integer_to_binary(Turn),
+        $|,
+        atom_to_binary(AgentId),
+        $|,
+        integer_to_binary(Iter),
+        $|,
+        ToolUseId
+    ]),
+    binary:encode_hex(crypto:hash(sha256, Input), lowercase).
+
+persist_tool_result(Checkpointer, RunId, ToolStepId, AgentId, Turn, Name, Output) ->
+    Record = #{
+        run_id => RunId,
+        tool_step_id => ToolStepId,
+        agent_id => AgentId,
+        turn => Turn,
+        tool_name => Name,
+        output => Output,
+        inserted_at => erlang:system_time(millisecond)
+    },
+    _ = gakudan_checkpointer:save_tool_result(Checkpointer, Record),
+    ok.
 
 run_tool_with_telemetry(RunId, AgentId, Turn, Name, RunFun, Input) ->
     StartMeta = #{run_id => RunId, agent_id => AgentId, turn => Turn, tool => Name},

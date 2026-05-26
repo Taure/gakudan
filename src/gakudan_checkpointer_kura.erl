@@ -27,7 +27,9 @@ the `kura` application env in the host application's `sys.config`.
     list_active/1,
     delete_run/2,
     save_step/2,
-    load_step/3
+    load_step/3,
+    save_tool_result/2,
+    load_tool_result/3
 ]).
 
 -export_type([state/0]).
@@ -105,6 +107,8 @@ list_active(#{repo := Repo}) ->
 delete_run(#{repo := Repo}, RunId) ->
     StepQ = kura_query:where(kura_query:from(gakudan_step_schema), {run_id, '=', RunId}),
     _ = kura_repo_worker:delete_all(Repo, StepQ),
+    ToolQ = kura_query:where(kura_query:from(gakudan_tool_result_schema), {run_id, '=', RunId}),
+    _ = kura_repo_worker:delete_all(Repo, ToolQ),
     RunQ = kura_query:where(kura_query:from(gakudan_run_schema), {run_id, '=', RunId}),
     case kura_repo_worker:delete_all(Repo, RunQ) of
         {ok, _N} -> ok;
@@ -144,6 +148,43 @@ save_step(#{repo := Repo}, Step) ->
     {ok, gakudan_checkpointer:step_record()} | {error, not_found}.
 load_step(#{repo := Repo}, _RunId, StepId) ->
     case kura_repo_worker:get(Repo, gakudan_step_schema, StepId) of
+        {ok, #{data := Blob}} -> {ok, binary_to_term(Blob)};
+        {error, not_found} = NF -> NF;
+        {error, _} -> {error, not_found}
+    end.
+
+-spec save_tool_result(state(), gakudan_checkpointer:tool_result_record()) -> ok | {error, term()}.
+save_tool_result(#{repo := Repo}, Record) ->
+    #{
+        run_id := RunId,
+        tool_step_id := ToolStepId,
+        agent_id := AgentId,
+        turn := Turn,
+        tool_name := ToolName,
+        inserted_at := InsertedAt
+    } = Record,
+    Now = system_time_datetime(InsertedAt),
+    Changes = #{
+        tool_step_id => ToolStepId,
+        run_id => RunId,
+        agent_id => atom_to_binary(AgentId),
+        turn => Turn,
+        tool_name => ToolName,
+        data => term_to_binary(Record),
+        inserted_at => Now
+    },
+    CS = kura_changeset:cast(
+        gakudan_tool_result_schema,
+        #{},
+        Changes,
+        [tool_step_id, run_id, agent_id, turn, tool_name, data, inserted_at]
+    ),
+    normalise(kura_repo_worker:insert(Repo, CS)).
+
+-spec load_tool_result(state(), gakudan:run_id(), binary()) ->
+    {ok, gakudan_checkpointer:tool_result_record()} | {error, not_found}.
+load_tool_result(#{repo := Repo}, _RunId, ToolStepId) ->
+    case kura_repo_worker:get(Repo, gakudan_tool_result_schema, ToolStepId) of
         {ok, #{data := Blob}} -> {ok, binary_to_term(Blob)};
         {error, not_found} = NF -> NF;
         {error, _} -> {error, not_found}

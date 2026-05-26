@@ -8,7 +8,9 @@
     step_record_round_trip/1,
     interrupt_then_resume/1,
     initial_messages_populate_blackboard/1,
-    snapshot_persists_through_lifecycle/1
+    snapshot_persists_through_lifecycle/1,
+    tool_result_round_trip/1,
+    tool_not_re_executed_on_replay/1
 ]).
 
 all() ->
@@ -18,7 +20,9 @@ all() ->
         step_record_round_trip,
         interrupt_then_resume,
         initial_messages_populate_blackboard,
-        snapshot_persists_through_lifecycle
+        snapshot_persists_through_lifecycle,
+        tool_result_round_trip,
+        tool_not_re_executed_on_replay
     ].
 
 init_per_suite(Config) ->
@@ -141,6 +145,67 @@ snapshot_persists_through_lifecycle(Config) ->
     awaiting_human = maps:get(status, Snap),
     Entries = maps:get(blackboard, Snap),
     true = length(Entries) >= 2.
+
+tool_result_round_trip(Config) ->
+    Backend = proplists:get_value(backend, Config),
+    {ok, Handle} = gakudan_checkpointer:init(gakudan_checkpointer_ets, Backend),
+    Rec = #{
+        run_id => ~"run-tr-1",
+        tool_step_id => ~"ts-aaa",
+        agent_id => agent_a,
+        turn => 1,
+        tool_name => ~"echo_tool",
+        output => ~"hello",
+        inserted_at => erlang:system_time(millisecond)
+    },
+    ok = gakudan_checkpointer:save_tool_result(Handle, Rec),
+    {ok, Loaded} = gakudan_checkpointer:load_tool_result(Handle, ~"run-tr-1", ~"ts-aaa"),
+    ~"ts-aaa" = maps:get(tool_step_id, Loaded),
+    ~"hello" = maps:get(output, Loaded),
+    {error, not_found} = gakudan_checkpointer:load_tool_result(Handle, ~"run-tr-1", ~"missing").
+
+tool_not_re_executed_on_replay(Config) ->
+    Backend = proplists:get_value(backend, Config),
+    {ok, Handle} = gakudan_checkpointer:init(gakudan_checkpointer_ets, Backend),
+    ok = counter_tool_mod:reset(),
+    {ok, Script} = gakudan_llm_stub_script:start_link([
+        {tool_use, ~"counter_tool", #{}},
+        {text, ~"done"}
+    ]),
+    LOpts = #{script_owner => Script},
+    RunId = ~"run-tool-idem",
+
+    {ok, BB1} = gakudan_blackboard:start_link(RunId),
+    ok = gakudan_turn:run(
+        RunId,
+        counter_agent,
+        agent_with_counter_mod,
+        1,
+        Handle,
+        gakudan_llm_stub,
+        LOpts,
+        BB1,
+        undefined
+    ),
+    1 = counter_tool_mod:count(),
+
+    %% Replay the same turn. The LLM step and the tool result are both
+    %% cached, so the tool must not run a second time.
+    {ok, BB2} = gakudan_blackboard:start_link(RunId),
+    ok = gakudan_turn:run(
+        RunId,
+        counter_agent,
+        agent_with_counter_mod,
+        1,
+        Handle,
+        gakudan_llm_stub,
+        LOpts,
+        BB2,
+        undefined
+    ),
+    1 = counter_tool_mod:count(),
+
+    gen_server:stop(Script).
 
 start_run(Script, MaxTurns) ->
     gakudan:start_run(#{
