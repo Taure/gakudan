@@ -45,7 +45,7 @@ init([]) ->
         #{
             id => gakudan_run_sup,
             start => {gakudan_run_sup, start_link, []},
-            restart => temporary,
+            restart => transient,
             type => supervisor
         }
     ],

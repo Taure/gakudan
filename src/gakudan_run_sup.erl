@@ -36,14 +36,17 @@ init({fresh, #{run_id := RunId} = Config}) ->
 init({resume, #{run_id := RunId} = Config, Snapshot}) ->
     SupFlags = #{strategy => one_for_all, intensity => 5, period => 10},
     Self = self(),
-    Restore = #{
-        entries => maps:get(blackboard, Snapshot, []),
-        kv => maps:get(kv, Snapshot, #{})
-    },
+    %% The blackboard starts empty; the run statem restores it from the
+    %% snapshot on init, the same path a supervised restart takes.
     Children = [
         #{
             id => blackboard,
-            start => {gakudan_blackboard, start_link, [RunId, Restore]},
+            start => {gakudan_blackboard, start_link, [RunId]},
+            type => worker
+        },
+        #{
+            id => stream,
+            start => {gakudan_stream, start_link, [RunId]},
             type => worker
         },
         #{

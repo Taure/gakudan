@@ -4,8 +4,8 @@ Date: 2026-05-26
 
 ## Status
 
-Accepted (v0.4). Landing in two parts: **tool idempotency** (Part 1,
-implemented) and **supervised resume** (Part 2, follow-up).
+Accepted (v0.4). Implemented in two parts: **tool idempotency** (Part 1)
+and **supervised resume** (Part 2).
 
 ## Context
 
@@ -86,17 +86,34 @@ reboot, by unifying boot-time and runtime recovery behind one rule:
   the latest snapshot for its `run_id`. If one exists, it resumes from
   it; only with no snapshot does it start fresh. Supervised restart thus
   resumes automatically instead of starting blank.
+- Only an **active** snapshot (`running` / `idle` / `awaiting_human`)
+  triggers a resume; a `completed` or errored snapshot is ignored and
+  the run starts fresh.
 - `gakudan_runs_sup` starts each per-run supervisor as `transient`, so
-  an abnormal exit is restarted (a normal/`completed` exit is not).
-- The per-run supervisor's `intensity`/`period` bounds restart
-  thrashing: a run that deterministically crashes exhausts its restart
-  budget, the supervisor gives up, and the snapshot is marked
-  `{error, restart_exhausted}` so it is not endlessly retried by the
-  boot resumer either.
+  an abnormal exit is restarted (a normal / `completed` / `shutdown`
+  exit is not).
+- Restart thrash is self-bounding: a run that deterministically crashes
+  exhausts the per-run supervisor's `intensity`, which makes that
+  supervisor exit with reason `shutdown`. Because the parent treats the
+  child as `transient`, a `shutdown` exit is **not** restarted, so the
+  run stops cleanly without cascading to the application. The snapshot
+  stays in its last state, recoverable at the next boot.
 
 `gakudan_runs_resumer` is unchanged in spirit but becomes the
 boot-time entry to the same "load snapshot, resume" path the supervisor
 now uses at runtime.
+
+Two implementation notes. First, the **blackboard is restored by the
+statem**, not the supervisor: both the fresh and resume specs start an
+empty blackboard, and the statem repopulates it from the snapshot via
+`gakudan_blackboard:restore/2`. This is what makes a `one_for_all`
+restart safe (the blackboard is wiped on restart, then rebuilt from the
+snapshot), and it also fixed a latent bug where the resume spec never
+started the per-run `stream` process. Second, resume does **not**
+auto-continue an in-flight turn: a resumed run re-enters `idle` (or
+`awaiting_human`) and continues on the next message. Re-dispatching a
+mid-turn fanout on resume is safe given the idempotency above, but is
+left as a later refinement.
 
 ## Consequences
 
