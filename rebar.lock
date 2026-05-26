@@ -1,7 +1,7 @@
 {"1.2.0",
 [{<<"kura">>,
   {git,"https://github.com/Taure/kura.git",
-       {ref,"de3fd745fc588ff9384e513b7254ddf28dcf11da"}},
+       {ref,"9035dbdb08d46427780bd831d577af40d91369e3"}},
   0},
  {<<"telemetry">>,{pkg,<<"telemetry">>,<<"1.3.0">>},0}]}.
 [

@@ -24,5 +24,19 @@ the IDs returned by each agent's `c:gakudan_agent:id/0` callback, which
 may differ from the module name.
 """.
 -callback init(Opts :: map(), Agents :: [gakudan_agent:id()]) -> {ok, state()}.
+
+-doc """
+Decide what runs next, given the router state and the current transcript.
+
+- `{next, Id, State}` runs agent `Id` as the next turn.
+- `{fanout, Ids, State}` runs every agent in `Ids` concurrently as one
+  parallel round; the router is consulted again only once all of them
+  have finished and appended their output. `{next, Id, State}` is the
+  degenerate fanout of one. See
+  [ADR 0007](docs/adr/0007-parallel-agent-execution.md).
+- `{done, State}` ends the run.
+""".
 -callback next(state(), Transcript :: [gakudan_blackboard:entry()]) ->
-    {next, gakudan_agent:id(), state()} | {done, state()}.
+    {next, gakudan_agent:id(), state()}
+    | {fanout, [gakudan_agent:id()], state()}
+    | {done, state()}.

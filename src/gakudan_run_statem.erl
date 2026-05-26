@@ -23,15 +23,17 @@
     turn = 0 :: non_neg_integer(),
     last_step = 0 :: non_neg_integer(),
     checkpointer :: undefined | {module(), term()},
-    turn_worker ::
-        undefined
-        | #{
-            pid := pid(),
-            ref := reference(),
-            agent_id := atom(),
-            turn := pos_integer(),
-            start_time := integer()
+    turn_workers = #{} ::
+        #{
+            pid() => #{
+                pid := pid(),
+                mon_ref := reference(),
+                agent_id := atom(),
+                turn := pos_integer(),
+                start_time := integer()
+            }
         },
+    fanout = undefined :: undefined | #{base := non_neg_integer(), size := pos_integer()},
     awaiters = [] :: [{pid(), reference()}],
     start_time :: integer()
 }).
@@ -169,51 +171,30 @@ handle_event(cast, {user_message, Msg}, idle, Data) ->
 handle_event(cast, {user_message, Msg}, running, Data) ->
     {ok, _} = gakudan_blackboard:append(Data#data.blackboard, user, Msg),
     keep_state_and_data;
-handle_event(
-    info,
-    {turn_complete, Ref, RouterState},
-    running,
-    #data{turn_worker = #{ref := Ref} = TW} = Data
-) ->
-    emit_turn_stop(Data, TW, ok, undefined),
-    Data1 = Data#data{
-        turn_worker = undefined, router_state = RouterState, turn = Data#data.turn + 1
-    },
-    case should_continue(Data1) of
-        true ->
-            save_snapshot(running, Data1),
-            dispatch_next_turn(Data1);
-        false ->
-            save_snapshot(idle, Data1),
-            {next_state, idle, Data1}
-    end;
-handle_event(
-    info, {turn_failed, Ref, Reason}, running, #data{turn_worker = #{ref := Ref} = TW} = Data
-) ->
-    emit_turn_stop(Data, TW, failed, Reason),
-    {ok, _} = gakudan_blackboard:append(
-        Data#data.blackboard,
-        system,
-        iolist_to_binary(io_lib:format("turn failed: ~p", [Reason]))
-    ),
-    Data1 = Data#data{turn_worker = undefined},
-    save_snapshot(idle, Data1),
-    {next_state, idle, Data1};
-handle_event(
-    info,
-    {'DOWN', Ref, process, _, Reason},
-    running,
-    #data{turn_worker = #{ref := Ref} = TW} = Data
-) when
-    Reason =/= normal
+handle_event(info, {turn_done, Pid}, running, #data{turn_workers = TWs} = Data) when
+    is_map_key(Pid, TWs)
 ->
+    TW = maps:get(Pid, TWs),
+    emit_turn_stop(Data, TW, ok, undefined),
+    demonitor_worker(TW),
+    finish_worker(Pid, Data);
+handle_event(info, {turn_failed, Pid, Reason}, running, #data{turn_workers = TWs} = Data) when
+    is_map_key(Pid, TWs)
+->
+    TW = maps:get(Pid, TWs),
     emit_turn_stop(Data, TW, failed, Reason),
-    {ok, _} = gakudan_blackboard:append(
-        Data#data.blackboard,
-        system,
-        iolist_to_binary(io_lib:format("turn worker crashed: ~p", [Reason]))
-    ),
-    {next_state, idle, Data#data{turn_worker = undefined}};
+    demonitor_worker(TW),
+    append_turn_failure(Data, ~"turn failed", Reason),
+    finish_worker(Pid, Data);
+handle_event(
+    info, {'DOWN', _MonRef, process, Pid, Reason}, running, #data{turn_workers = TWs} = Data
+) when
+    is_map_key(Pid, TWs), Reason =/= normal
+->
+    TW = maps:get(Pid, TWs),
+    emit_turn_stop(Data, TW, failed, Reason),
+    append_turn_failure(Data, ~"turn worker crashed", Reason),
+    finish_worker(Pid, Data);
 handle_event({call, _From}, wait_ready, initialising, _Data) ->
     {keep_state_and_data, [postpone]};
 handle_event({call, From}, wait_ready, _State, _Data) ->
@@ -276,10 +257,18 @@ dispatch_next_turn(Data) ->
     Entries = gakudan_blackboard:entries(BB),
     case decide_with_telemetry(RunId, RMod, RState, Entries) of
         {next, AgentId, RState1} ->
-            start_turn(AgentId, Data#data{router_state = RState1});
+            start_fanout([AgentId], Data#data{router_state = RState1});
+        {fanout, [_ | _] = AgentIds, RState1} ->
+            start_fanout(AgentIds, Data#data{router_state = RState1});
+        {fanout, [], RState1} ->
+            go_idle(Data#data{router_state = RState1});
         {done, RState1} ->
-            {next_state, idle, Data#data{router_state = RState1}}
+            go_idle(Data#data{router_state = RState1})
     end.
+
+go_idle(Data) ->
+    save_snapshot(idle, Data),
+    {next_state, idle, Data}.
 
 decide_with_telemetry(RunId, RMod, RState, Entries) ->
     StartMeta = #{run_id => RunId, router => RMod},
@@ -290,13 +279,29 @@ decide_with_telemetry(RunId, RMod, RState, Entries) ->
             case RMod:next(RState, Entries) of
                 {next, AgentId, _RState1} = Result ->
                     {Result, StartMeta#{decision => {next, AgentId}}};
+                {fanout, AgentIds, _RState1} = Result ->
+                    {Result, StartMeta#{decision => {fanout, AgentIds}}};
                 {done, _RState1} = Result ->
                     {Result, StartMeta#{decision => done}}
             end
         end
     ).
 
-start_turn(AgentId, Data) ->
+%% Dispatch one parallel round. Each agent runs as its own monitored
+%% worker on the same pre-fanout transcript; the router is re-consulted
+%% only once every worker has finished. A `{next, Id}` decision is the
+%% degenerate fanout of one. See ADR 0007.
+start_fanout(AgentIds, Data0) ->
+    Base = Data0#data.turn,
+    Data = Data0#data{fanout = #{base => Base, size => length(AgentIds)}},
+    save_snapshot(running, Data),
+    Indexed = lists:zip(lists:seq(1, length(AgentIds)), AgentIds),
+    Workers = maps:from_list(
+        [spawn_worker(AgentId, Base + I, Data) || {I, AgentId} <- Indexed]
+    ),
+    {next_state, running, Data#data{turn_workers = Workers}}.
+
+spawn_worker(AgentId, TurnNumber, Data) ->
     #data{
         run_id = RunId,
         agents = Agents,
@@ -304,34 +309,55 @@ start_turn(AgentId, Data) ->
         llm_opts = LOpts,
         blackboard = BB,
         stream = Stream,
-        turn = T,
         checkpointer = Checkpointer
     } = Data,
     {AgentMod, _AgentOpts} = maps:get(AgentId, Agents),
     Self = self(),
-    Ref = make_ref(),
-    TurnNumber = T + 1,
     StartTime = erlang:monotonic_time(),
     emit_turn_start(RunId, AgentId, TurnNumber),
-    {Pid, _} = spawn_monitor(fun() ->
+    {Pid, MonRef} = spawn_monitor(fun() ->
         try
             ok = gakudan_turn:run(
                 RunId, AgentId, AgentMod, TurnNumber, Checkpointer, LMod, LOpts, BB, Stream
             ),
-            Self ! {turn_complete, Ref, Data#data.router_state}
+            Self ! {turn_done, self()}
         catch
             Class:Reason:_St ->
-                Self ! {turn_failed, Ref, {Class, Reason}}
+                Self ! {turn_failed, self(), {Class, Reason}}
         end
     end),
-    TW = #{
+    WInfo = #{
         pid => Pid,
-        ref => Ref,
+        mon_ref => MonRef,
         agent_id => AgentId,
         turn => TurnNumber,
         start_time => StartTime
     },
-    {next_state, running, Data#data{turn_worker = TW}}.
+    {Pid, WInfo}.
+
+finish_worker(Pid, Data) ->
+    TWs = maps:remove(Pid, Data#data.turn_workers),
+    Data1 = Data#data{turn_workers = TWs},
+    case maps:size(TWs) of
+        0 -> fanout_complete(Data1);
+        _ -> {keep_state, Data1}
+    end.
+
+fanout_complete(#data{fanout = #{base := Base, size := Size}} = Data) ->
+    Data1 = Data#data{turn = Base + Size, fanout = undefined},
+    case should_continue(Data1) of
+        true -> dispatch_next_turn(Data1);
+        false -> go_idle(Data1)
+    end.
+
+demonitor_worker(#{mon_ref := MonRef}) ->
+    _ = erlang:demonitor(MonRef, [flush]),
+    ok.
+
+append_turn_failure(Data, Prefix, Reason) ->
+    Body = iolist_to_binary([Prefix, ": ", io_lib:format("~p", [Reason])]),
+    {ok, _} = gakudan_blackboard:append(Data#data.blackboard, system, Body),
+    ok.
 
 should_continue(#data{turn = T, max_turns = M}) when T >= M -> false;
 should_continue(_) -> true.
