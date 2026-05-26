@@ -1,7 +1,7 @@
 -module(gakudan_turn).
 -moduledoc false.
 
--export([run/9]).
+-export([run/10]).
 
 -define(MAX_TOOL_ITERATIONS, 10).
 
@@ -14,9 +14,10 @@
     module(),
     map(),
     pid(),
-    undefined | pid()
+    undefined | pid(),
+    [gakudan_guardrail:ref()]
 ) -> ok.
-run(RunId, AgentId, AgentMod, Turn, Checkpointer, LlmMod, LlmOpts, Blackboard, Stream) ->
+run(RunId, AgentId, AgentMod, Turn, Checkpointer, LlmMod, LlmOpts, Blackboard, Stream, Guardrails) ->
     System = AgentMod:system_prompt(),
     ResolvedTools = gakudan_tool:resolve(AgentMod:tools()),
     Specs = [maps:get(spec, R) || R <- ResolvedTools],
@@ -36,7 +37,8 @@ run(RunId, AgentId, AgentMod, Turn, Checkpointer, LlmMod, LlmOpts, Blackboard, S
         llm_mod => LlmMod,
         llm_opts => LlmOpts,
         bb => Blackboard,
-        stream => Stream
+        stream => Stream,
+        guardrails => Guardrails
     },
     loop(Ctx, Messages, 0).
 
@@ -51,21 +53,67 @@ loop(Ctx, Msgs, N) ->
         model := Model,
         bb := BB
     } = Ctx,
-    Req = #{model => Model, system => Sys, tools => Tools, messages => Msgs},
-    case complete_with_idempotency(Ctx, N, Req) of
-        {ok, #{stop_reason := end_turn, content := Content}} ->
-            Text = collect_text(Content),
-            {ok, _} = gakudan_blackboard:append(BB, {agent, AgentId}, Text),
-            ok;
-        {ok, #{stop_reason := tool_use, content := Content}} ->
-            ToolUses = [B || #{type := tool_use} = B <- Content],
-            ToolResults = run_tools(Ctx, N, ResolvedTools, ToolUses),
-            AssistantTurn = #{role => assistant, content => Content},
-            UserTurn = #{role => user, content => ToolResults},
-            loop(Ctx, Msgs ++ [AssistantTurn, UserTurn], N + 1);
-        {error, Reason} ->
-            error({llm_error, Reason})
+    case guard(Ctx, input, Msgs) of
+        {block, Block} ->
+            append_block(Ctx, input, Block);
+        {ok, GuardedMsgs} ->
+            Req = #{model => Model, system => Sys, tools => Tools, messages => GuardedMsgs},
+            case complete_with_idempotency(Ctx, N, Req) of
+                {ok, #{stop_reason := end_turn, content := Content}} ->
+                    case guard(Ctx, output, collect_text(Content)) of
+                        {block, Block} ->
+                            append_block(Ctx, output, Block);
+                        {ok, Text} ->
+                            {ok, _} = gakudan_blackboard:append(BB, {agent, AgentId}, Text),
+                            ok
+                    end;
+                {ok, #{stop_reason := tool_use, content := Content}} ->
+                    ToolUses = [B || #{type := tool_use} = B <- Content],
+                    ToolResults = run_tools(Ctx, N, ResolvedTools, ToolUses),
+                    AssistantTurn = #{role => assistant, content => Content},
+                    UserTurn = #{role => user, content => ToolResults},
+                    loop(Ctx, Msgs ++ [AssistantTurn, UserTurn], N + 1);
+                {error, Reason} ->
+                    error({llm_error, Reason})
+            end
     end.
+
+guard(Ctx, Stage, Payload) ->
+    case maps:get(guardrails, Ctx, []) of
+        [] ->
+            {ok, Payload};
+        Guardrails ->
+            Base = #{
+                run_id => maps:get(run_id, Ctx),
+                agent_id => maps:get(agent_id, Ctx),
+                turn => maps:get(turn, Ctx)
+            },
+            gakudan_guardrail:run(Guardrails, Stage, Payload, Base)
+    end.
+
+append_block(Ctx, Stage, {Mod, Reason}) ->
+    #{run_id := RunId, agent_id := AgentId, turn := Turn, bb := BB} = Ctx,
+    Body = iolist_to_binary([
+        atom_to_binary(Stage),
+        " blocked by ",
+        atom_to_binary(Mod),
+        ": ",
+        io_lib:format("~p", [Reason])
+    ]),
+    {ok, _} = gakudan_blackboard:append(BB, system, Body),
+    telemetry:execute(
+        [gakudan, guardrail, block],
+        #{system_time => erlang:system_time()},
+        #{
+            run_id => RunId,
+            agent_id => AgentId,
+            turn => Turn,
+            stage => Stage,
+            guardrail => Mod,
+            reason => Reason
+        }
+    ),
+    ok.
 
 complete_with_idempotency(Ctx, Iter, Req) ->
     #{

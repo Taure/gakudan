@@ -189,7 +189,8 @@ tool_not_re_executed_on_replay(Config) ->
         gakudan_llm_stub,
         LOpts,
         BB1,
-        undefined
+        undefined,
+        []
     ),
     1 = counter_tool_mod:count(),
 
@@ -205,7 +206,8 @@ tool_not_re_executed_on_replay(Config) ->
         gakudan_llm_stub,
         LOpts,
         BB2,
-        undefined
+        undefined,
+        []
     ),
     1 = counter_tool_mod:count(),
 
