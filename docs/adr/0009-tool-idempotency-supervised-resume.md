@@ -109,11 +109,14 @@ empty blackboard, and the statem repopulates it from the snapshot via
 `gakudan_blackboard:restore/2`. This is what makes a `one_for_all`
 restart safe (the blackboard is wiped on restart, then rebuilt from the
 snapshot), and it also fixed a latent bug where the resume spec never
-started the per-run `stream` process. Second, resume does **not**
-auto-continue an in-flight turn: a resumed run re-enters `idle` (or
-`awaiting_human`) and continues on the next message. Re-dispatching a
-mid-turn fanout on resume is safe given the idempotency above, but is
-left as a later refinement.
+started the per-run `stream` process. Second, resume **auto-continues an
+in-flight fanout**: a `running` snapshot records the fanout's agent ids,
+and on resume the statem re-dispatches that fanout directly - bypassing
+the router, whose state has already advanced past the decision - then
+lets the router continue from there. The re-run is idempotent via the
+cached LLM steps and tool results above, so no work is duplicated. A
+resumed `awaiting_human` run still waits for a human; an `idle` run waits
+for the next message.
 
 ## Consequences
 

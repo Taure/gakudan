@@ -33,7 +33,7 @@
                 start_time := integer()
             }
         },
-    fanout = undefined :: undefined | #{base := non_neg_integer(), size := pos_integer()},
+    fanout = undefined :: undefined | #{base := non_neg_integer(), agents := [gakudan_agent:id()]},
     awaiters = [] :: [{pid(), reference()}],
     start_time :: integer()
 }).
@@ -127,6 +127,7 @@ init({resume, RunSup, Config, Snapshot}) ->
         max_turns = MaxTurns,
         turn = Turn,
         last_step = LastStep,
+        fanout = maps:get(fanout, Snapshot, undefined),
         checkpointer = Checkpointer,
         start_time = erlang:monotonic_time()
     },
@@ -146,7 +147,7 @@ handle_event(internal, finish_init, initialising, Data) ->
             %% supervised restart, so rehydrate instead of starting fresh.
             Data2 = rehydrate(Data1, Snapshot),
             emit_run_start(Data2),
-            {next_state, resume_state(maps:get(statem_state, Snapshot)), Data2};
+            enter_resumed(maps:get(statem_state, Snapshot), Data2);
         none ->
             Data2 = append_initial_messages(Data1),
             emit_run_start(Data2),
@@ -157,7 +158,7 @@ handle_event(internal, {finish_resume, PriorState, Restore}, initialising, Data)
     Data1 = register_children(Data),
     ok = gakudan_blackboard:restore(Data1#data.blackboard, Restore),
     emit_run_start(Data1),
-    {next_state, resume_state(PriorState), Data1};
+    enter_resumed(PriorState, Data1);
 handle_event(enter, _Old, idle, Data) ->
     notify_awaiters(Data#data.awaiters, Data#data.blackboard),
     {keep_state, Data#data{awaiters = []}};
@@ -230,6 +231,8 @@ handle_event({call, From}, {resume, _Payload}, _State, _Data) ->
     {keep_state_and_data, [{reply, From, {error, not_interrupted}}]};
 handle_event(internal, dispatch_after_resume, awaiting_human, Data) ->
     dispatch_next_turn(Data);
+handle_event(internal, {redispatch_fanout, Agents}, idle, Data) ->
+    start_fanout(Agents, Data);
 handle_event(_Type, _Event, _State, _Data) ->
     keep_state_and_data.
 
@@ -291,7 +294,7 @@ decide_with_telemetry(RunId, RMod, RState, Entries) ->
 %% degenerate fanout of one. See ADR 0007.
 start_fanout(AgentIds, Data0) ->
     Base = Data0#data.turn,
-    Data = Data0#data{fanout = #{base => Base, size => length(AgentIds)}},
+    Data = Data0#data{fanout = #{base => Base, agents => AgentIds}},
     save_snapshot(running, Data),
     Indexed = lists:zip(lists:seq(1, length(AgentIds)), AgentIds),
     Workers = maps:from_list(
@@ -341,8 +344,8 @@ finish_worker(Pid, Data) ->
         _ -> {keep_state, Data1}
     end.
 
-fanout_complete(#data{fanout = #{base := Base, size := Size}} = Data) ->
-    Data1 = Data#data{turn = Base + Size, fanout = undefined},
+fanout_complete(#data{fanout = #{base := Base, agents := Agents}} = Data) ->
+    Data1 = Data#data{turn = Base + length(Agents), fanout = undefined},
     case should_continue(Data1) of
         true -> dispatch_next_turn(Data1);
         false -> go_idle(Data1)
@@ -405,10 +408,21 @@ rehydrate(Data, Snapshot) ->
         kv => maps:get(kv, Snapshot, #{})
     },
     ok = gakudan_blackboard:restore(Data#data.blackboard, Restore),
-    Data#data{router_state = RouterState, turn = Turn, last_step = LastStep}.
+    Data#data{
+        router_state = RouterState,
+        turn = Turn,
+        last_step = LastStep,
+        fanout = maps:get(fanout, Snapshot, undefined)
+    }.
 
-resume_state(awaiting_human) -> awaiting_human;
-resume_state(_) -> idle.
+enter_resumed(running, #data{fanout = #{agents := Agents}} = Data) when is_list(Agents) ->
+    %% Crashed mid-fanout: re-run the in-flight fanout directly (idempotent
+    %% via cached LLM steps + tool results), then the router continues.
+    {next_state, idle, Data, [{next_event, internal, {redispatch_fanout, Agents}}]};
+enter_resumed(awaiting_human, Data) ->
+    {next_state, awaiting_human, Data};
+enter_resumed(_State, Data) ->
+    {next_state, idle, Data}.
 
 find_child(Sup, Id) ->
     case lists:keyfind(Id, 1, supervisor:which_children(Sup)) of
@@ -519,6 +533,7 @@ save_snapshot(Status, #data{checkpointer = Handle} = Data) ->
         router_state => RouterState,
         statem_state => Status,
         turn => Turn,
+        fanout => Data#data.fanout,
         updated_at => erlang:system_time(millisecond)
     },
     _ = gakudan_checkpointer:save_snapshot(Handle, Snapshot),
