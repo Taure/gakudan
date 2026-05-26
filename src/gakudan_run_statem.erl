@@ -130,36 +130,34 @@ init({resume, RunSup, Config, Snapshot}) ->
         checkpointer = Checkpointer,
         start_time = erlang:monotonic_time()
     },
-    {ok, initialising, Data, [{next_event, internal, {finish_resume, PriorState}}]}.
+    Restore = #{
+        entries => maps:get(blackboard, Snapshot, []),
+        kv => maps:get(kv, Snapshot, #{})
+    },
+    {ok, initialising, Data, [{next_event, internal, {finish_resume, PriorState, Restore}}]}.
 
 handle_event(enter, _Old, initialising, _Data) ->
     keep_state_and_data;
 handle_event(internal, finish_init, initialising, Data) ->
-    Blackboard = find_child(Data#data.run_sup, blackboard),
-    Stream = find_child(Data#data.run_sup, stream),
-    ok = gakudan_registry:register(
-        Data#data.run_id, Data#data.run_sup, self(), Blackboard, Stream
-    ),
-    Data1 = Data#data{blackboard = Blackboard, stream = Stream},
-    Data2 = append_initial_messages(Data1),
-    emit_run_start(Data2),
-    save_snapshot(idle, Data2),
-    {next_state, idle, Data2};
-handle_event(internal, {finish_resume, PriorState}, initialising, Data) ->
-    Blackboard = find_child(Data#data.run_sup, blackboard),
-    Stream = find_child(Data#data.run_sup, stream),
-    ok = gakudan_registry:register(
-        Data#data.run_id, Data#data.run_sup, self(), Blackboard, Stream
-    ),
-    Data1 = Data#data{blackboard = Blackboard, stream = Stream},
+    Data1 = register_children(Data),
+    case load_active_snapshot(Data1) of
+        {ok, Snapshot} ->
+            %% A snapshot for this run already exists: this is a
+            %% supervised restart, so rehydrate instead of starting fresh.
+            Data2 = rehydrate(Data1, Snapshot),
+            emit_run_start(Data2),
+            {next_state, resume_state(maps:get(statem_state, Snapshot)), Data2};
+        none ->
+            Data2 = append_initial_messages(Data1),
+            emit_run_start(Data2),
+            save_snapshot(idle, Data2),
+            {next_state, idle, Data2}
+    end;
+handle_event(internal, {finish_resume, PriorState, Restore}, initialising, Data) ->
+    Data1 = register_children(Data),
+    ok = gakudan_blackboard:restore(Data1#data.blackboard, Restore),
     emit_run_start(Data1),
-    NextState =
-        case PriorState of
-            awaiting_human -> awaiting_human;
-            running -> idle;
-            _ -> idle
-        end,
-    {next_state, NextState, Data1};
+    {next_state, resume_state(PriorState), Data1};
 handle_event(enter, _Old, idle, Data) ->
     notify_awaiters(Data#data.awaiters, Data#data.blackboard),
     {keep_state, Data#data{awaiters = []}};
@@ -373,6 +371,44 @@ build_agents_map(Specs) ->
 
 agent_id(Mod) when is_atom(Mod) -> Mod:id();
 agent_id({Mod, _Opts}) -> Mod:id().
+
+register_children(Data) ->
+    Blackboard = find_child(Data#data.run_sup, blackboard),
+    Stream = find_child(Data#data.run_sup, stream),
+    ok = gakudan_registry:register(
+        Data#data.run_id, Data#data.run_sup, self(), Blackboard, Stream
+    ),
+    Data#data{blackboard = Blackboard, stream = Stream}.
+
+load_active_snapshot(#data{checkpointer = undefined}) ->
+    none;
+load_active_snapshot(#data{checkpointer = Handle, run_id = RunId}) ->
+    case gakudan_checkpointer:load_snapshot(Handle, RunId) of
+        {ok, #{status := Status} = Snapshot} ->
+            case is_active(Status) of
+                true -> {ok, Snapshot};
+                false -> none
+            end;
+        {error, _} ->
+            none
+    end.
+
+is_active(running) -> true;
+is_active(idle) -> true;
+is_active(awaiting_human) -> true;
+is_active(_) -> false.
+
+rehydrate(Data, Snapshot) ->
+    #{router_state := RouterState, turn := Turn, last_step := LastStep} = Snapshot,
+    Restore = #{
+        entries => maps:get(blackboard, Snapshot, []),
+        kv => maps:get(kv, Snapshot, #{})
+    },
+    ok = gakudan_blackboard:restore(Data#data.blackboard, Restore),
+    Data#data{router_state = RouterState, turn = Turn, last_step = LastStep}.
+
+resume_state(awaiting_human) -> awaiting_human;
+resume_state(_) -> idle.
 
 find_child(Sup, Id) ->
     case lists:keyfind(Id, 1, supervisor:which_children(Sup)) of

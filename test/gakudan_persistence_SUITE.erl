@@ -10,7 +10,8 @@
     initial_messages_populate_blackboard/1,
     snapshot_persists_through_lifecycle/1,
     tool_result_round_trip/1,
-    tool_not_re_executed_on_replay/1
+    tool_not_re_executed_on_replay/1,
+    supervised_restart_restores_run/1
 ]).
 
 all() ->
@@ -22,7 +23,8 @@ all() ->
         initial_messages_populate_blackboard,
         snapshot_persists_through_lifecycle,
         tool_result_round_trip,
-        tool_not_re_executed_on_replay
+        tool_not_re_executed_on_replay,
+        supervised_restart_restores_run
     ].
 
 init_per_suite(Config) ->
@@ -207,6 +209,35 @@ tool_not_re_executed_on_replay(Config) ->
 
     gen_server:stop(Script).
 
+supervised_restart_restores_run(_Config) ->
+    {ok, Script} = gakudan_llm_stub_script:start_link([
+        {text, ~"alpha"}, {text, ~"beta"}, {text, ~"gamma"}, {text, ~"delta"}
+    ]),
+    {ok, _Sup, RunId} = start_run(Script, 8),
+    ok = gakudan:send(RunId, ~"go"),
+    {ok, _} = gakudan:await(RunId, 5000),
+    {ok, BB0} = gakudan_run:blackboard(RunId),
+    Before = length(gakudan_blackboard:entries(BB0)),
+    true = Before > 0,
+
+    %% Kill the run statem; one_for_all restarts the children and the new
+    %% statem must rehydrate from the snapshot and restore the transcript.
+    {ok, #{run_statem := StatemPid}} = gakudan_registry:lookup(RunId),
+    MRef = erlang:monitor(process, StatemPid),
+    exit(StatemPid, kill),
+    receive
+        {'DOWN', MRef, process, StatemPid, _} -> ok
+    after 2000 -> ct:fail(statem_not_killed)
+    end,
+
+    ok = wait_until_idle(RunId, 5000),
+    {ok, BB1} = gakudan_run:blackboard(RunId),
+    After = length(gakudan_blackboard:entries(BB1)),
+    true = After >= Before,
+
+    ok = gakudan:stop(RunId),
+    gen_server:stop(Script).
+
 start_run(Script, MaxTurns) ->
     gakudan:start_run(#{
         agents => [agent_a_mod, agent_b_mod],
@@ -233,3 +264,27 @@ base_snapshot(RunId, Status) ->
         turn => 0,
         updated_at => erlang:system_time(millisecond)
     }.
+
+wait_until_idle(RunId, Timeout) ->
+    Deadline = erlang:monotonic_time(millisecond) + Timeout,
+    wait_until_idle_loop(RunId, Deadline).
+
+wait_until_idle_loop(RunId, Deadline) ->
+    Status =
+        try
+            gakudan:status(RunId)
+        catch
+            _:_ -> retry
+        end,
+    case Status of
+        {ok, idle} ->
+            ok;
+        _ ->
+            case erlang:monotonic_time(millisecond) > Deadline of
+                true ->
+                    ct:fail(not_idle_after_restart);
+                false ->
+                    timer:sleep(50),
+                    wait_until_idle_loop(RunId, Deadline)
+            end
+    end.
