@@ -45,6 +45,7 @@ gakudan:send(RunId, ~"Build a small TCP echo server in Erlang."),
     llm := llm_spec(),
     max_turns => pos_integer(),
     checkpointer => checkpointer_spec(),
+    guardrails => [gakudan_guardrail:ref()],
     initial_messages => [initial_message()]
 }.
 

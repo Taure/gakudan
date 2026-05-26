@@ -13,6 +13,7 @@
     blackboard :: undefined | pid(),
     stream :: undefined | pid(),
     config :: gakudan:run_config(),
+    guardrails = [] :: [gakudan_guardrail:ref()],
     agents :: #{atom() => {module(), map()}},
     agent_ids :: [atom()],
     router_mod :: module(),
@@ -88,6 +89,7 @@ init({fresh, RunSup, Config}) ->
         run_sup = RunSup,
         blackboard = undefined,
         config = Config,
+        guardrails = maps:get(guardrails, Config, []),
         agents = Agents,
         agent_ids = AgentIds,
         router_mod = RMod,
@@ -118,6 +120,7 @@ init({resume, RunSup, Config, Snapshot}) ->
         run_sup = RunSup,
         blackboard = undefined,
         config = Config,
+        guardrails = maps:get(guardrails, Config, []),
         agents = Agents,
         agent_ids = AgentIds,
         router_mod = RMod,
@@ -310,7 +313,8 @@ spawn_worker(AgentId, TurnNumber, Data) ->
         llm_opts = LOpts,
         blackboard = BB,
         stream = Stream,
-        checkpointer = Checkpointer
+        checkpointer = Checkpointer,
+        guardrails = Guardrails
     } = Data,
     {AgentMod, _AgentOpts} = maps:get(AgentId, Agents),
     Self = self(),
@@ -319,7 +323,16 @@ spawn_worker(AgentId, TurnNumber, Data) ->
     {Pid, MonRef} = spawn_monitor(fun() ->
         try
             ok = gakudan_turn:run(
-                RunId, AgentId, AgentMod, TurnNumber, Checkpointer, LMod, LOpts, BB, Stream
+                RunId,
+                AgentId,
+                AgentMod,
+                TurnNumber,
+                Checkpointer,
+                LMod,
+                LOpts,
+                BB,
+                Stream,
+                Guardrails
             ),
             Self ! {turn_done, self()}
         catch
