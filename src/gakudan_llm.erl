@@ -49,6 +49,7 @@ it transparently fall back to `complete/2` wrapped in a single
     | {tool_use_input_delta, #{id := binary(), partial_json := binary()}}
     | {message_delta, #{stop_reason => atom()}}
     | {message_stop, response()}
+    | {cancelled, map()}
     | {exception, term()}.
 
 -callback complete(request(), Opts :: map()) -> {ok, response()} | {error, term()}.

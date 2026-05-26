@@ -27,7 +27,7 @@
     [gakudan_guardrail:ref()]
 ) -> ok.
 run(RunId, AgentId, AgentMod, Turn, Checkpointer, LlmMod, LlmOpts, Blackboard, Stream, Guardrails) ->
-    {ok, _Usage} = run(
+    _ = run(
         RunId,
         AgentId,
         AgentMod,
@@ -54,7 +54,7 @@ run(RunId, AgentId, AgentMod, Turn, Checkpointer, LlmMod, LlmOpts, Blackboard, S
     undefined | pid(),
     [gakudan_guardrail:ref()],
     audit_ctx()
-) -> {ok, usage()}.
+) -> {ok, usage()} | {cancelled, usage()}.
 run(
     RunId,
     AgentId,
@@ -132,6 +132,8 @@ loop(Ctx, Msgs, N, Usage) ->
                     AssistantTurn = #{role => assistant, content => Content},
                     UserTurn = #{role => user, content => ToolResults},
                     loop(Ctx, Msgs ++ [AssistantTurn, UserTurn], N + 1, Usage1);
+                {error, cancelled} ->
+                    {cancelled, Usage};
                 {error, Reason} ->
                     error({llm_error, Reason})
             end

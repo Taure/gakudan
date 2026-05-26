@@ -109,7 +109,11 @@ stream_loop(ReqId, Sub, Ref, Pending, Acc, Timeout) ->
             {error, Reason};
         {http, {ReqId, {{_, Code, _}, _Hdrs, Body}}} when Code >= 400 ->
             Sub ! {gakudan_llm_stream, Ref, {exception, {http_error, Code, Body}}},
-            {error, {http_error, Code, Body}}
+            {error, {http_error, Code, Body}};
+        gakudan_llm_cancel ->
+            _ = httpc:cancel_request(ReqId),
+            Sub ! {gakudan_llm_stream, Ref, {cancelled, #{}}},
+            {error, cancelled}
     after Timeout ->
         _ = httpc:cancel_request(ReqId),
         Sub ! {gakudan_llm_stream, Ref, {exception, timeout}},

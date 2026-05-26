@@ -9,6 +9,16 @@ and gakudan uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Streaming cancellation + load-shedding.** New `gakudan:cancel/1` stops a
+  run's in-flight generation: the backend `httpc` request is aborted
+  (`gakudan_llm_cancel` reaches the worker's `stream_loop`), subscribers get a
+  `{cancelled, _}` event, and the run returns to `idle` with a `system` entry
+  and `[gakudan, run, cancelled]` telemetry. `gakudan_stream` sheds load per
+  subscriber: events for a subscriber whose mailbox exceeds `stream_max_queue`
+  (app env, default 10000) are dropped, with a `{dropped, N}` marker folded
+  into its next delivery. See
+  [ADR 0014](docs/adr/0014-streaming-cancellation-backpressure.md).
+
 - **Cost budgets.** New `gakudan_budget` behaviour: a budget is checked
   before each turn is dispatched and stops the run before it spends past a
   ceiling. Built-in `gakudan_budget_limit` covers the universal caps
