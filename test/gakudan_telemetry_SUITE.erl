@@ -105,6 +105,7 @@ llm_request_span_emits_tokens(_Config) ->
     ?assertEqual(RunId, maps:get(run_id, StartMeta)),
     ?assertEqual(gakudan_llm_stub, maps:get(backend, StartMeta)),
     ?assertEqual(~"stub", maps:get(model, StartMeta)),
+    ?assertEqual(1, maps:get(turn, StartMeta)),
 
     {ok, StopMeasurements, StopMeta} = receive_event([gakudan, llm, request, stop], 1000),
     ?assertMatch(#{duration := _, tokens_in := 0, tokens_out := 0}, StopMeasurements),
@@ -146,6 +147,7 @@ tool_run_span_emits(_Config) ->
     {ok, _, StartMeta} = receive_event([gakudan, tool, run, start], 1000),
     ?assertEqual(RunId, maps:get(run_id, StartMeta)),
     ?assertEqual(~"echo_tool", maps:get(tool, StartMeta)),
+    ?assertEqual(1, maps:get(turn, StartMeta)),
 
     {ok, _, StopMeta} = receive_event([gakudan, tool, run, stop], 1000),
     ?assertEqual(ok, maps:get(outcome, StopMeta)),

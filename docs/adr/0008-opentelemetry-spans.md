@@ -46,7 +46,8 @@ Two constraints:
 Ship a separate `gakudan_otel` companion library (sibling to
 `gakudan_metrics`), depending on `opentelemetry_api` (and, for a batteries-
 included path, `opentelemetry` + an OTLP exporter the operator wires
-up). Core gakudan is untouched.
+up). Core gakudan needs one small, additive change (below); everything
+else lives in the companion.
 
 ### Span tree
 
@@ -75,20 +76,33 @@ live OTel span contexts:
 
 - `{run_id}` -> root span ctx
 - `{run_id, turn}` -> turn span ctx
-- `{run_id, turn, request_id}` -> llm.request span ctx
 
 When a child event arrives, the handler looks up its parent ctx by key
 and starts the OTel span with that explicit parent, rather than relying
-on process-dictionary propagation. `trace_id` is derived
-deterministically from `run_id` so a resumed run (ADR 0004) continues
-the same trace across a BEAM restart.
+on process-dictionary propagation. `llm.request` and `tool.run` spans
+are children of the turn span, looked up by `{run_id, turn}`; they need
+no registry entry of their own (nothing nests under them in v1).
+`trace_id` is derived deterministically from `run_id` so a resumed run
+(ADR 0004) continues the same trace across a BEAM restart.
 
-To make the keys reliably available, the metadata already on the events
-is sufficient (`run_id`, `agent_id`, `turn`, `request_id` are all
-present per ADR 0001 / 0005). No change to core emit sites is required.
-If a gap is found during implementation, the fix is to add a metadata
-field to an event (a minor, additive ADR 0001 change), never to couple
-core to OTel.
+### The one core change: `turn` on the llm/tool spans
+
+The turn span is keyed by `{run_id, turn}`, so the `llm.request` and
+`tool.run` span events must carry `turn` in their metadata to find their
+parent. The `run` and `turn` events already do; the `llm.request` and
+`tool.run` spans, as of v0.4, carry `run_id` + `agent_id` but **not**
+`turn`. This ADR therefore adds `turn` to those two spans' metadata - a
+single map key, backwards compatible (ADR 0001 consumers ignore unknown
+keys), and the only change required in core.
+
+**Why not key the turn span by `{run_id, agent_id}` and skip the core
+change?** Because ADR 0007 lets one fanout run the same agent more than
+once concurrently (e.g. `{fanout, [critic, critic, critic]}` to sample a
+critic for variance). Those workers share an `agent_id` but get distinct
+turn numbers, so `{run_id, agent_id}` would collide and nest llm/tool
+spans under the wrong turn. Turn numbers are unique within a run by
+construction, so `{run_id, turn}` is the only correct key - which is
+what makes the small metadata addition worth it.
 
 ### What lands on each span
 

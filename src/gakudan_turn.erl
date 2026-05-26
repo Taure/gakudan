@@ -59,8 +59,8 @@ loop(Ctx, Msgs, N) ->
             ok;
         {ok, #{stop_reason := tool_use, content := Content}} ->
             ToolUses = [B || #{type := tool_use} = B <- Content],
-            #{run_id := RunId} = Ctx,
-            ToolResults = run_tools(RunId, AgentId, ResolvedTools, ToolUses),
+            #{run_id := RunId, turn := Turn} = Ctx,
+            ToolResults = run_tools(RunId, AgentId, Turn, ResolvedTools, ToolUses),
             AssistantTurn = #{role => assistant, content => Content},
             UserTurn = #{role => user, content => ToolResults},
             loop(Ctx, Msgs ++ [AssistantTurn, UserTurn], N + 1);
@@ -82,13 +82,15 @@ complete_with_idempotency(Ctx, Iter, Req) ->
     StepId = step_id(RunId, Turn, AgentId, Iter),
     case Checkpointer of
         undefined ->
-            stream_with_telemetry(RunId, AgentId, LMod, Model, Req, LOpts, Stream);
+            stream_with_telemetry(RunId, AgentId, Turn, LMod, Model, Req, LOpts, Stream);
         _ ->
             case gakudan_checkpointer:load_step(Checkpointer, RunId, StepId) of
                 {ok, #{response := CachedResp}} ->
                     {ok, CachedResp};
                 {error, not_found} ->
-                    case stream_with_telemetry(RunId, AgentId, LMod, Model, Req, LOpts, Stream) of
+                    case
+                        stream_with_telemetry(RunId, AgentId, Turn, LMod, Model, Req, LOpts, Stream)
+                    of
                         {ok, Resp} = Ok ->
                             persist_step(Checkpointer, RunId, StepId, AgentId, Turn, Req, Resp),
                             Ok;
@@ -126,10 +128,11 @@ step_id(RunId, Turn, AgentId, Iter) ->
     Hash = crypto:hash(sha256, Input),
     binary:encode_hex(Hash, lowercase).
 
-stream_with_telemetry(RunId, AgentId, LMod, Model, Req, LOpts, Stream) ->
+stream_with_telemetry(RunId, AgentId, Turn, LMod, Model, Req, LOpts, Stream) ->
     StartMeta = #{
         run_id => RunId,
         agent_id => AgentId,
+        turn => Turn,
         backend => LMod,
         model => Model
     },
@@ -251,7 +254,7 @@ collect_text(Content) ->
     Texts = [T || #{type := text, text := T} <- Content],
     iolist_to_binary(lists:join(~"\n", Texts)).
 
-run_tools(RunId, AgentId, ResolvedTools, ToolUses) ->
+run_tools(RunId, AgentId, Turn, ResolvedTools, ToolUses) ->
     NameMap = maps:from_list([
         {maps:get(name, maps:get(spec, R)), R}
      || R <- ResolvedTools
@@ -260,7 +263,7 @@ run_tools(RunId, AgentId, ResolvedTools, ToolUses) ->
         fun(#{id := Id, name := Name, input := Input}) ->
             case maps:find(Name, NameMap) of
                 {ok, #{run := RunFun}} ->
-                    case run_tool_with_telemetry(RunId, AgentId, Name, RunFun, Input) of
+                    case run_tool_with_telemetry(RunId, AgentId, Turn, Name, RunFun, Input) of
                         {ok, Output} ->
                             #{
                                 type => tool_result,
@@ -287,8 +290,8 @@ run_tools(RunId, AgentId, ResolvedTools, ToolUses) ->
         ToolUses
     ).
 
-run_tool_with_telemetry(RunId, AgentId, Name, RunFun, Input) ->
-    StartMeta = #{run_id => RunId, agent_id => AgentId, tool => Name},
+run_tool_with_telemetry(RunId, AgentId, Turn, Name, RunFun, Input) ->
+    StartMeta = #{run_id => RunId, agent_id => AgentId, turn => Turn, tool => Name},
     telemetry:span(
         [gakudan, tool, run],
         StartMeta,
