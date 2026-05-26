@@ -146,17 +146,27 @@ a run's events oldest-first by id even when several share a whole-second
 `inserted_at`. (UUIDv7 via `jhn_uuid` would serve the same role if that dep is
 later pulled into core.)
 
-**Integrity.** Each row stores `event_hash = sha256(deterministic(event))`,
-which detects after-the-fact modification of a row; `verify/2` rescans a run's
-rows and recomputes the hashes (`list/2` returns the decoded events). Full
-hash-*chaining* (each row hashing the
-previous, so deletion and insertion are also detectable) needs a serialized
-writer, because a fanout emits audit writes from concurrent turn-worker
-processes and a read-then-chain race would fork the chain. That serialization
-is deliberately deferred; v1 ships per-row hashing, which is honest about what
-it guarantees. A sink with a dependency core must not carry (Kafka, a SIEM
-exporter) is the case for a future sister lib; it is not needed for the
-default.
+**Integrity.** Rows are hash-chained per run. Each row stores
+`event_hash = sha256(deterministic(event))` (detects an edited row) and
+`row_hash = sha256(prev_hash <> event_hash)`, linking it to the run's previous
+row so deletions and insertions break the chain too. `verify/2` walks the
+chain in id order and reports any row whose content hash, link, or row hash
+no longer matches.
+
+The chain needs a serialized writer, because a fanout emits audit writes from
+concurrent turn-worker processes and a naive read-then-chain would fork the
+chain. Rather than add a supervised writer process (awkward for a library),
+the write runs in a transaction that selects the run's latest row
+`FOR UPDATE`, so concurrent writers for the same run serialize on that lock.
+The lock is a no-op on SQLite, which serializes writers itself. The genesis
+event (`run_started`) is always written first by the run statem, before any
+fanout, so there is always a row to lock by the time concurrent writes occur.
+The one residual case is a locking `SELECT ... ORDER BY id DESC LIMIT 1` under
+Postgres `READ COMMITTED`, where extreme concurrency at the very first
+post-genesis write could in principle fork; the consequence is a `verify/2`
+false-positive (it flags rather than hides), which is the safe direction. A
+sink with a dependency core must not carry (Kafka, a SIEM exporter) is the
+case for a future sister lib; it is not needed for the default.
 
 ## Consequences
 
@@ -170,9 +180,11 @@ default.
   data-at-rest surface.
 - The guardrail decision trail also makes `guardrail_transform` (a redaction
   actually happening) observable, which telemetry only exposed for blocks.
-- Per-row hashing detects row edits but not row deletion; full chaining is
-  deferred (see the default-sink note). Operators needing deletion-evidence
-  today should point the sink at append-only / WORM storage.
+- The per-run hash chain detects edits, deletions, and mid-chain insertions. A
+  row forged onto the chain tail (no successor) is not caught without an
+  external length/tail anchor, which the default sink does not keep. The other
+  residual is a rare Postgres-only fork under extreme concurrent genesis, which
+  surfaces as a `verify/2` false-positive (safe direction).
 
 **Negative.**
 
