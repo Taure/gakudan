@@ -148,21 +148,27 @@ documents the contract by example.
 
 **Negative / deferred.**
 
-- **Append order within a fanout is completion order, not list order.**
-  Aggregating routers must key on `{agent, AgentId}` rather than
-  position. Deterministic ordering (statem collects then appends in
-  list order) is a possible v0.5 refinement and would require the turn
-  worker to return its text instead of self-appending; deferred until a
-  consumer needs it.
+- **Append order within a fanout is completion order, not list order -
+  deliberately.** Each worker appends its own output as it finishes, so
+  a fast agent's result reaches subscribers and `await/2` immediately
+  instead of being held until the slowest agent in the round returns.
+  List-order would trade that responsiveness for cross-run
+  reproducibility (which only matters between separate runs) and would
+  couple the statem to turn outputs (workers returning text rather than
+  self-appending). Responsiveness is the better default; aggregating
+  routers key on `{agent, AgentId}`, not position. Revisit only if a
+  consumer needs strict ordering.
 - **Interrupting mid-fanout does not cancel in-flight workers.** As in
   the single-turn case today, an `interrupt/2` during a fanout lets
   running turns finish; their appends may land after the interrupt
   entry. Documented; killing branches on interrupt is deferred.
-- **No fanout-level concurrency cap.** A router that fans out to 1000
-  agents starts 1000 turn workers and 1000 concurrent LLM calls.
-  Backpressure / a `max_parallel` knob is a future addition if a
-  consumer hits provider rate limits; for now it is the router author's
-  responsibility.
+- **No fanout-level concurrency cap, by design.** A router that fans out
+  to N agents starts N concurrent turn workers. Bounding that is the
+  router author's job: return smaller fanouts (or successive rounds) if
+  a provider's rate limits matter. A core `max_parallel` knob would be
+  premature - no consumer needs it yet, and it adds worker-pool
+  bookkeeping to the hot path. Add it only when a real workload hits the
+  limit.
 
 ### Stability
 
