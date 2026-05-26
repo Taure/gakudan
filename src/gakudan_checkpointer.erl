@@ -14,6 +14,9 @@ Two collections live in this contract:
   Overwritten in place every meaningful state transition.
 - **Step records** are append-only per LLM call. They power idempotent
   resume and double as a cost / audit ledger.
+- **Tool-result records** are append-only per executed tool call. On
+  resume, a cached result is replayed instead of re-running the tool, so
+  side effects are exactly-once at the library boundary (ADR 0009).
 """.
 
 -export([
@@ -23,10 +26,12 @@ Two collections live in this contract:
     list_active/1,
     delete_run/2,
     save_step/2,
-    load_step/3
+    load_step/3,
+    save_tool_result/2,
+    load_tool_result/3
 ]).
 
--export_type([state/0, run_snapshot/0, step_record/0, run_status/0]).
+-export_type([state/0, run_snapshot/0, step_record/0, tool_result_record/0, run_status/0]).
 
 -type state() :: term().
 
@@ -62,6 +67,16 @@ Two collections live in this contract:
     inserted_at := integer()
 }.
 
+-type tool_result_record() :: #{
+    run_id := gakudan:run_id(),
+    tool_step_id := binary(),
+    agent_id := atom(),
+    turn := non_neg_integer(),
+    tool_name := binary(),
+    output := term(),
+    inserted_at := integer()
+}.
+
 -callback init(Opts :: map()) -> {ok, state()} | {error, term()}.
 -callback save_snapshot(state(), run_snapshot()) -> ok | {error, term()}.
 -callback load_snapshot(state(), gakudan:run_id()) ->
@@ -71,6 +86,9 @@ Two collections live in this contract:
 -callback save_step(state(), step_record()) -> ok | {error, term()}.
 -callback load_step(state(), gakudan:run_id(), StepId :: binary()) ->
     {ok, step_record()} | {error, not_found}.
+-callback save_tool_result(state(), tool_result_record()) -> ok | {error, term()}.
+-callback load_tool_result(state(), gakudan:run_id(), ToolStepId :: binary()) ->
+    {ok, tool_result_record()} | {error, not_found}.
 
 -doc "Initialise a checkpointer impl. Returns its opaque state handle.".
 -spec init(module(), map()) -> {ok, {module(), state()}} | {error, term()}.
@@ -144,6 +162,35 @@ load_step({Mod, State}, RunId, StepId) ->
         StartMeta,
         fun() ->
             Result = Mod:load_step(State, RunId, StepId),
+            {Result, #{}, load_stop_meta(StartMeta, Result)}
+        end
+    ).
+
+-doc "Persist a tool-result record for exactly-once replay. Telemetry-wrapped.".
+-spec save_tool_result({module(), state()}, tool_result_record()) -> ok | {error, term()}.
+save_tool_result({Mod, State}, Record) ->
+    #{run_id := RunId} = Record,
+    Bytes = erlang:external_size(Record),
+    StartMeta = #{run_id => RunId, kind => tool_result},
+    telemetry:span(
+        [gakudan, checkpoint, save],
+        StartMeta,
+        fun() ->
+            Result = Mod:save_tool_result(State, Record),
+            {Result, #{bytes => Bytes}, stop_meta(StartMeta, Result)}
+        end
+    ).
+
+-doc "Look up a tool-result record by (run_id, tool_step_id). Telemetry-wrapped.".
+-spec load_tool_result({module(), state()}, gakudan:run_id(), binary()) ->
+    {ok, tool_result_record()} | {error, not_found}.
+load_tool_result({Mod, State}, RunId, ToolStepId) ->
+    StartMeta = #{run_id => RunId, kind => tool_result},
+    telemetry:span(
+        [gakudan, checkpoint, load],
+        StartMeta,
+        fun() ->
+            Result = Mod:load_tool_result(State, RunId, ToolStepId),
             {Result, #{}, load_stop_meta(StartMeta, Result)}
         end
     ).

@@ -4,7 +4,8 @@ Date: 2026-05-26
 
 ## Status
 
-Proposed.
+Accepted (v0.4). Landing in two parts: **tool idempotency** (Part 1,
+implemented) and **supervised resume** (Part 2, follow-up).
 
 ## Context
 

@@ -10,7 +10,9 @@
     list_active/1,
     delete_run/2,
     save_step/2,
-    load_step/3
+    load_step/3,
+    save_tool_result/2,
+    load_tool_result/3
 ]).
 
 -export([new/0, reset/1]).
@@ -18,7 +20,8 @@
 new() ->
     Snaps = ensure_table(gakudan_ckp_snaps),
     Steps = ensure_table(gakudan_ckp_steps),
-    #{snaps => Snaps, steps => Steps}.
+    Tools = ensure_table(gakudan_ckp_tools),
+    #{snaps => Snaps, steps => Steps, tools => Tools}.
 
 ensure_table(Name) ->
     case ets:whereis(Name) of
@@ -29,9 +32,10 @@ ensure_table(Name) ->
     end,
     Name.
 
-reset(#{snaps := S, steps := T}) ->
+reset(#{snaps := S, steps := T, tools := U}) ->
     ets:delete_all_objects(S),
     ets:delete_all_objects(T),
+    ets:delete_all_objects(U),
     ok.
 
 init(Opts) ->
@@ -62,9 +66,10 @@ list_active(#{snaps := Tab}) ->
     ),
     {ok, Active}.
 
-delete_run(#{snaps := Snaps, steps := Steps}, RunId) ->
+delete_run(#{snaps := Snaps, steps := Steps, tools := Tools}, RunId) ->
     true = ets:delete(Snaps, RunId),
     ets:match_delete(Steps, {{RunId, '_'}, '_'}),
+    ets:match_delete(Tools, {{RunId, '_'}, '_'}),
     ok.
 
 save_step(#{steps := Tab}, #{run_id := RunId, step_id := StepId} = Step) ->
@@ -74,5 +79,15 @@ save_step(#{steps := Tab}, #{run_id := RunId, step_id := StepId} = Step) ->
 load_step(#{steps := Tab}, RunId, StepId) ->
     case ets:lookup(Tab, {RunId, StepId}) of
         [{_, Step}] -> {ok, Step};
+        [] -> {error, not_found}
+    end.
+
+save_tool_result(#{tools := Tab}, #{run_id := RunId, tool_step_id := ToolStepId} = Record) ->
+    true = ets:insert(Tab, {{RunId, ToolStepId}, Record}),
+    ok.
+
+load_tool_result(#{tools := Tab}, RunId, ToolStepId) ->
+    case ets:lookup(Tab, {RunId, ToolStepId}) of
+        [{_, Record}] -> {ok, Record};
         [] -> {error, not_found}
     end.
