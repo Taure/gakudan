@@ -3,6 +3,8 @@
 
 -behaviour(gen_statem).
 
+-include_lib("kernel/include/logger.hrl").
+
 -export([start_link/2, start_link/3, send/2, status/1, stop/1, await/2, wait_ready/1]).
 -export([interrupt/2, resume/2]).
 -export([callback_mode/0, init/1, handle_event/4, terminate/3]).
@@ -26,6 +28,9 @@
     checkpointer :: undefined | {module(), term()},
     audit = undefined :: gakudan_audit:handle(),
     actor = #{} :: map(),
+    budget = undefined :: undefined | gakudan_budget:ref(),
+    used = #{tokens_in => 0, tokens_out => 0, llm_calls => 0} :: gakudan_turn:usage(),
+    stopped = undefined :: undefined | term(),
     turn_workers = #{} ::
         #{
             pid() => #{
@@ -102,6 +107,7 @@ init({fresh, RunSup, Config}) ->
         checkpointer = Checkpointer,
         audit = init_audit(Config),
         actor = maps:get(actor, Config, #{}),
+        budget = init_budget(Config),
         start_time = erlang:monotonic_time()
     },
     {ok, initialising, Data, [{next_event, internal, finish_init}]};
@@ -138,6 +144,7 @@ init({resume, RunSup, Config, Snapshot}) ->
         checkpointer = Checkpointer,
         audit = init_audit(Config),
         actor = maps:get(actor, Config, #{}),
+        budget = init_budget(Config),
         start_time = erlang:monotonic_time()
     },
     Restore = #{
@@ -182,13 +189,13 @@ handle_event(cast, {user_message, Msg}, idle, Data) ->
 handle_event(cast, {user_message, Msg}, running, Data) ->
     {ok, _} = gakudan_blackboard:append(Data#data.blackboard, user, Msg),
     keep_state_and_data;
-handle_event(info, {turn_done, Pid}, running, #data{turn_workers = TWs} = Data) when
+handle_event(info, {turn_done, Pid, Usage}, running, #data{turn_workers = TWs} = Data) when
     is_map_key(Pid, TWs)
 ->
     TW = maps:get(Pid, TWs),
     emit_turn_stop(Data, TW, ok, undefined),
     demonitor_worker(TW),
-    finish_worker(Pid, Data);
+    finish_worker(Pid, accumulate_usage(Data, Usage));
 handle_event(info, {turn_failed, Pid, Reason}, running, #data{turn_workers = TWs} = Data) when
     is_map_key(Pid, TWs)
 ->
@@ -251,19 +258,32 @@ handle_event(_Type, _Event, _State, _Data) ->
     keep_state_and_data.
 
 terminate(Reason, State, Data) ->
-    case {State, Reason} of
-        {awaiting_human, _} -> ok;
-        {_, normal} -> save_snapshot(completed, Data);
-        {_, shutdown} -> save_snapshot(completed, Data);
-        {_, {shutdown, _}} -> save_snapshot(completed, Data);
-        {_, _} -> save_snapshot({error, Reason}, Data)
+    StopReason = stop_reason(Data, Reason),
+    case State of
+        awaiting_human -> ok;
+        _ -> save_snapshot(snapshot_status(StopReason), Data)
     end,
-    emit_run_stop(Data, Reason),
-    emit_audit_best_effort(Data, run_stopped, #{reason => Reason}),
+    emit_run_stop(Data, StopReason),
+    emit_audit_best_effort(Data, run_stopped, #{reason => StopReason}),
     gakudan_registry:unregister(Data#data.run_id),
     ok.
 
+stop_reason(#data{stopped = undefined}, Reason) -> Reason;
+stop_reason(#data{stopped = Stopped}, _Reason) -> Stopped.
+
+snapshot_status(normal) -> completed;
+snapshot_status(shutdown) -> completed;
+snapshot_status({shutdown, _}) -> completed;
+snapshot_status({budget_exceeded, _}) -> completed;
+snapshot_status(Reason) -> {error, Reason}.
+
 dispatch_next_turn(Data) ->
+    case check_budget(Data) of
+        allow -> route_next_turn(Data);
+        {deny, DenyInfo} -> stop_for_budget(Data, DenyInfo)
+    end.
+
+route_next_turn(Data) ->
     #data{
         run_id = RunId,
         router_mod = RMod,
@@ -336,7 +356,7 @@ spawn_worker(AgentId, TurnNumber, Data) ->
     emit_turn_start(RunId, AgentId, TurnNumber),
     {Pid, MonRef} = spawn_monitor(fun() ->
         try
-            ok = gakudan_turn:run(
+            {ok, Usage} = gakudan_turn:run(
                 RunId,
                 AgentId,
                 AgentMod,
@@ -349,7 +369,7 @@ spawn_worker(AgentId, TurnNumber, Data) ->
                 Guardrails,
                 #{audit => Audit, actor => Actor}
             ),
-            Self ! {turn_done, self()}
+            Self ! {turn_done, self(), Usage}
         catch
             Class:Reason:_St ->
                 Self ! {turn_failed, self(), {Class, Reason}}
@@ -533,6 +553,12 @@ init_audit(Config) ->
         end,
     gakudan_audit:init(Spec).
 
+init_budget(Config) ->
+    case maps:get(budget, Config, undefined) of
+        undefined -> application:get_env(gakudan, default_budget, undefined);
+        Ref -> Ref
+    end.
+
 emit_audit(Data, Type, Detail) ->
     emit_audit(Data, Type, Detail, Data#data.audit).
 
@@ -553,6 +579,59 @@ resume_detail(Payload) when is_binary(Payload) ->
     #{mode => human, payload_bytes => byte_size(Payload)};
 resume_detail(_Payload) ->
     #{mode => human}.
+
+check_budget(#data{budget = undefined}) ->
+    allow;
+check_budget(#data{budget = Budget, run_id = RunId, actor = Actor} = Data) ->
+    gakudan_budget:check(Budget, budget_usage(Data), #{run_id => RunId, actor => Actor}).
+
+budget_usage(#data{used = Used, turn = Turn}) ->
+    #{tokens_in := In, tokens_out := Out} = Used,
+    Used#{total_tokens => In + Out, turns => Turn}.
+
+accumulate_usage(#data{used = Used} = Data, Usage) ->
+    Data#data{
+        used = #{
+            tokens_in => maps:get(tokens_in, Used) + maps:get(tokens_in, Usage, 0),
+            tokens_out => maps:get(tokens_out, Used) + maps:get(tokens_out, Usage, 0),
+            llm_calls => maps:get(llm_calls, Used) + maps:get(llm_calls, Usage, 0)
+        }
+    }.
+
+stop_for_budget(Data, {Mod, Reason} = DenyInfo) ->
+    Body = iolist_to_binary([
+        "budget exceeded by ",
+        atom_to_binary(Mod),
+        ": ",
+        io_lib:format("~p", [Reason])
+    ]),
+    {ok, _} = gakudan_blackboard:append(Data#data.blackboard, system, Body),
+    Usage = budget_usage(Data),
+    telemetry:execute(
+        [gakudan, budget, exceeded],
+        #{
+            tokens_in => maps:get(tokens_in, Usage),
+            tokens_out => maps:get(tokens_out, Usage),
+            total_tokens => maps:get(total_tokens, Usage),
+            llm_calls => maps:get(llm_calls, Usage)
+        },
+        #{run_id => Data#data.run_id, budget => Mod, reason => Reason}
+    ),
+    %% The statem is a permanent child, so a self-stop would be restarted.
+    %% Tear the whole run down via the runs supervisor, asynchronously so we
+    %% are not blocked terminating our own supervisor. terminate/3 reads the
+    %% marker to report the budget reason rather than the shutdown reason.
+    RunSup = Data#data.run_sup,
+    RunId = Data#data.run_id,
+    _ = spawn(fun() ->
+        case gakudan_runs_sup:stop_run(RunSup) of
+            ok ->
+                ok;
+            {error, Why} ->
+                ?LOG_WARNING(#{msg => "budget stop teardown failed", run_id => RunId, reason => Why})
+        end
+    end),
+    {keep_state, Data#data{stopped = {budget_exceeded, DenyInfo}}}.
 
 append_initial_messages(#data{config = Config, blackboard = BB} = Data) ->
     Initial = maps:get(initial_messages, Config, []),
