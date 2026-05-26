@@ -9,7 +9,11 @@ server's tool list, and exposes `list_tools/1`, `get_tool/2`,
 `call_tool/3`. Tools are surfaced as `gakudan_tool:ref()` values via
 `as_tools/1` so they splice directly into an agent's `tools/0` list.
 
-See [ADR 0006](docs/adr/0006-mcp-client.md).
+Auth is `none`, a static `{bearer, Token}`, or `{oauth2, Config}` - the
+OAuth 2.1 client-credentials grant for OAuth-gated servers, with the token
+fetched, cached, and refreshed automatically. See
+[ADR 0006](docs/adr/0006-mcp-client.md) and
+[ADR 0015](docs/adr/0015-mcp-oauth.md).
 """.
 
 -behaviour(gen_server).
@@ -17,7 +21,7 @@ See [ADR 0006](docs/adr/0006-mcp-client.md).
 -export([start_link/1, list_tools/1, get_tool/2, call_tool/3, as_tools/1, stop/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2]).
 
--export_type([config/0, auth/0, tool_spec/0]).
+-export_type([config/0, auth/0, oauth_config/0, tool_spec/0]).
 
 -type config() :: #{
     name => atom(),
@@ -28,7 +32,14 @@ See [ADR 0006](docs/adr/0006-mcp-client.md).
     protocol_version => binary()
 }.
 
--type auth() :: none | {bearer, binary()}.
+-type auth() :: none | {bearer, binary()} | {oauth2, oauth_config()}.
+
+-type oauth_config() :: #{
+    token_url := binary(),
+    client_id := binary(),
+    client_secret := binary(),
+    scope => binary()
+}.
 
 -type tool_spec() :: gakudan_tool:spec().
 
@@ -43,7 +54,8 @@ See [ADR 0006](docs/adr/0006-mcp-client.md).
     protocol :: binary(),
     next_id = 1 :: pos_integer(),
     server_info :: undefined | map(),
-    tools = #{} :: #{binary() => tool_spec()}
+    tools = #{} :: #{binary() => tool_spec()},
+    token_cache :: undefined | #{access_token := binary(), expires_at := integer()}
 }).
 
 -doc """
@@ -206,10 +218,10 @@ json_rpc_call(Method, Params, State) ->
         params => Params
     },
     case http_post(State1, Body) of
-        {ok, ResponseJson} ->
-            interpret_response(ResponseJson, State1);
-        {error, _} = Err ->
-            Err
+        {ok, ResponseJson, State2} ->
+            interpret_response(ResponseJson, State2);
+        {error, Reason, _State2} ->
+            {error, Reason}
     end.
 
 interpret_response(Json, State) when is_map(Json) ->
@@ -232,25 +244,40 @@ mcp_error_message(#{~"message" := M}) -> M;
 mcp_error_message(_) -> ~"".
 
 http_post(State, BodyMap) ->
+    http_post(State, BodyMap, true).
+
+http_post(State, BodyMap, RetryOn401) ->
+    case resolve_auth(State) of
+        {ok, AuthHeaders, State1} ->
+            case do_post(State1, BodyMap, AuthHeaders) of
+                {ok, {{_, 401, _}, _Hdrs, RespBody}} ->
+                    case {RetryOn401, State1#state.auth} of
+                        {true, {oauth2, _}} ->
+                            %% Token may have been revoked early: refetch once.
+                            http_post(State1#state{token_cache = undefined}, BodyMap, false);
+                        _ ->
+                            {error, {http_error, 401, RespBody}, State1}
+                    end;
+                {ok, {{_, Code, _}, _Hdrs, RespBody}} when Code >= 200, Code < 300 ->
+                    case decode_body(RespBody) of
+                        {ok, Json} -> {ok, Json, State1};
+                        {error, Reason} -> {error, Reason, State1}
+                    end;
+                {ok, {{_, Code, _}, _Hdrs, RespBody}} ->
+                    {error, {http_error, Code, RespBody}, State1};
+                {error, Reason} ->
+                    {error, Reason, State1}
+            end;
+        {error, Reason, State1} ->
+            {error, Reason, State1}
+    end.
+
+do_post(State, BodyMap, AuthHeaders) ->
     Url = binary_to_list(State#state.base_url),
-    Headers = headers(State#state.auth),
+    Headers = [{"accept", "application/json"} | AuthHeaders],
     Body = iolist_to_binary(json:encode(BodyMap)),
     Request = {Url, Headers, "application/json", Body},
-    case
-        httpc:request(
-            post,
-            Request,
-            [{timeout, State#state.timeout}],
-            [{body_format, binary}]
-        )
-    of
-        {ok, {{_, Code, _}, _Hdrs, RespBody}} when Code >= 200, Code < 300 ->
-            decode_body(RespBody);
-        {ok, {{_, Code, _}, _Hdrs, RespBody}} ->
-            {error, {http_error, Code, RespBody}};
-        {error, Reason} ->
-            {error, Reason}
-    end.
+    httpc:request(post, Request, [{timeout, State#state.timeout}], [{body_format, binary}]).
 
 decode_body(<<>>) ->
     {error, empty_response};
@@ -261,13 +288,82 @@ decode_body(Body) ->
         Class:Reason -> {error, {decode_failed, Class, Reason}}
     end.
 
-headers(none) ->
-    [{"accept", "application/json"}];
-headers({bearer, Token}) when is_binary(Token) ->
-    [
-        {"accept", "application/json"},
-        {"authorization", binary_to_list(<<"Bearer ", Token/binary>>)}
-    ].
+resolve_auth(#state{auth = none} = State) ->
+    {ok, [], State};
+resolve_auth(#state{auth = {bearer, Token}} = State) when is_binary(Token) ->
+    {ok, [bearer_header(Token)], State};
+resolve_auth(#state{auth = {oauth2, Cfg}} = State) ->
+    case ensure_token(Cfg, State) of
+        {ok, Token, State1} -> {ok, [bearer_header(Token)], State1};
+        {error, Reason} -> {error, {oauth_token_failed, Reason}, State}
+    end.
+
+bearer_header(Token) ->
+    {"authorization", binary_to_list(<<"Bearer ", Token/binary>>)}.
+
+ensure_token(Cfg, State) ->
+    Now = erlang:system_time(second),
+    case State#state.token_cache of
+        #{access_token := Token, expires_at := ExpiresAt} when ExpiresAt > Now ->
+            {ok, Token, State};
+        _ ->
+            fetch_and_cache(Cfg, State)
+    end.
+
+fetch_and_cache(Cfg, State) ->
+    case fetch_token(Cfg, State#state.timeout) of
+        {ok, Token, ExpiresIn} ->
+            %% Clamp the safety skew so a short-lived token still caches for a
+            %% positive window rather than being born expired.
+            Skew = min(30, ExpiresIn div 2),
+            ExpiresAt = erlang:system_time(second) + ExpiresIn - Skew,
+            Cache = #{access_token => Token, expires_at => ExpiresAt},
+            {ok, Token, State#state{token_cache = Cache}};
+        {error, _} = Err ->
+            Err
+    end.
+
+fetch_token(#{token_url := Url, client_id := Id, client_secret := Secret} = Cfg, Timeout) ->
+    Params =
+        [
+            {"grant_type", "client_credentials"},
+            {"client_id", binary_to_list(Id)},
+            {"client_secret", binary_to_list(Secret)}
+        ] ++ scope_param(maps:get(scope, Cfg, undefined)),
+    Form = uri_string:compose_query(Params),
+    Request =
+        {
+            binary_to_list(Url),
+            [{"accept", "application/json"}],
+            "application/x-www-form-urlencoded",
+            Form
+        },
+    case httpc:request(post, Request, [{timeout, Timeout}], [{body_format, binary}]) of
+        {ok, {{_, Code, _}, _Hdrs, Body}} when Code >= 200, Code < 300 ->
+            parse_token(Body);
+        {ok, {{_, Code, _}, _Hdrs, Body}} ->
+            {error, {token_http_error, Code, Body}};
+        {error, Reason} ->
+            {error, Reason}
+    end.
+
+scope_param(undefined) -> [];
+scope_param(Scope) when is_binary(Scope) -> [{"scope", binary_to_list(Scope)}].
+
+parse_token(Body) ->
+    case decode_body(Body) of
+        {ok, #{~"access_token" := Token} = Json} when is_binary(Token) ->
+            {ok, Token, expires_in(maps:get(~"expires_in", Json, 3600))};
+        {ok, _} ->
+            {error, no_access_token};
+        {error, _} = Err ->
+            Err
+    end.
+
+%% Some servers omit or mis-type expires_in; fall back to a sane default
+%% rather than crash on the arithmetic.
+expires_in(N) when is_integer(N), N > 0 -> N;
+expires_in(_) -> 3600.
 
 ensure_inets() ->
     case inets:start() of

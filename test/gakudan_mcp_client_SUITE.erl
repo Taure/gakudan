@@ -12,6 +12,11 @@
     call_tool_isError_maps_to_error_tuple/1,
     rpc_error_propagates/1,
     bearer_auth_header_is_sent/1,
+    oauth2_fetches_token_and_sends_bearer/1,
+    oauth2_caches_token_across_calls/1,
+    oauth2_missing_access_token_fails_start/1,
+    oauth2_401_invalidates_cache_and_retries_once/1,
+    oauth2_second_401_is_terminal/1,
     as_tools_returns_gakudan_mcp_tool_refs/1,
     tool_resolution_through_gakudan_mcp_tool/1
 ]).
@@ -26,6 +31,11 @@ all() ->
         call_tool_isError_maps_to_error_tuple,
         rpc_error_propagates,
         bearer_auth_header_is_sent,
+        oauth2_fetches_token_and_sends_bearer,
+        oauth2_caches_token_across_calls,
+        oauth2_missing_access_token_fails_start,
+        oauth2_401_invalidates_cache_and_retries_once,
+        oauth2_second_401_is_terminal,
         as_tools_returns_gakudan_mcp_tool_refs,
         tool_resolution_through_gakudan_mcp_tool
     ].
@@ -138,6 +148,106 @@ bearer_auth_header_is_sent(_Config) ->
     gakudan_mcp_client:stop(Pid),
     mcp_stub_server:stop(Server).
 
+oauth2_fetches_token_and_sends_bearer(_Config) ->
+    {ok, Server} = mcp_stub_server:start(oauth_handler(~"oauth-tok-1")),
+    Url = stub_url(Server),
+    {ok, Pid} = gakudan_mcp_client:start_link(#{
+        base_url => Url,
+        auth =>
+            {oauth2, #{
+                token_url => Url,
+                client_id => ~"cid",
+                client_secret => ~"sec",
+                scope => ~"mcp.tools"
+            }}
+    }),
+    Calls = mcp_stub_server:calls(Server),
+    MCPCalls = [C || C <- Calls, maps:is_key(~"method", maps:get(body, C))],
+    [First | _] = MCPCalls,
+    ?assertEqual(
+        ~"Bearer oauth-tok-1",
+        proplists:get_value("authorization", maps:get(headers, First))
+    ),
+    gakudan_mcp_client:stop(Pid),
+    mcp_stub_server:stop(Server).
+
+oauth2_caches_token_across_calls(_Config) ->
+    {ok, Server} = mcp_stub_server:start(oauth_handler(~"oauth-tok-2")),
+    Url = stub_url(Server),
+    {ok, Pid} = gakudan_mcp_client:start_link(#{
+        base_url => Url,
+        auth => {oauth2, #{token_url => Url, client_id => ~"cid", client_secret => ~"sec"}}
+    }),
+    %% handshake makes two MCP calls (initialize + tools/list) but the token
+    %% is fetched once and reused.
+    Calls = mcp_stub_server:calls(Server),
+    TokenCalls = [C || C <- Calls, not maps:is_key(~"method", maps:get(body, C))],
+    ?assertEqual(1, length(TokenCalls)),
+    gakudan_mcp_client:stop(Pid),
+    mcp_stub_server:stop(Server).
+
+oauth2_missing_access_token_fails_start(_Config) ->
+    %% start_link links the failing process to us; trap so its exit signal
+    %% does not take the test process down.
+    process_flag(trap_exit, true),
+    Handler = fun
+        (#{~"method" := _} = Body) -> (default_handler())(Body);
+        (_) -> #{~"error" => ~"invalid_client"}
+    end,
+    {ok, Server} = mcp_stub_server:start(Handler),
+    Url = stub_url(Server),
+    Result = gakudan_mcp_client:start_link(#{
+        base_url => Url,
+        auth => {oauth2, #{token_url => Url, client_id => ~"x", client_secret => ~"y"}}
+    }),
+    ?assertMatch({error, {handshake_failed, {oauth_token_failed, no_access_token}}}, Result),
+    mcp_stub_server:stop(Server).
+
+oauth2_401_invalidates_cache_and_retries_once(_Config) ->
+    %% The first MCP call after the token fetch gets a 401; the client must
+    %% refetch the token and retry once, then succeed.
+    Counter = counters:new(1, []),
+    Handler = fun
+        (#{~"method" := _} = Body) ->
+            case counters:get(Counter, 1) of
+                0 ->
+                    counters:add(Counter, 1, 1),
+                    {401, ~"unauthorized"};
+                _ ->
+                    (default_handler())(Body)
+            end;
+        (_) ->
+            #{~"access_token" => ~"tok", ~"expires_in" => 3600}
+    end,
+    {ok, Server} = mcp_stub_server:start(Handler),
+    Url = stub_url(Server),
+    {ok, Pid} = gakudan_mcp_client:start_link(#{
+        base_url => Url,
+        auth => {oauth2, #{token_url => Url, client_id => ~"c", client_secret => ~"s"}}
+    }),
+    Calls = mcp_stub_server:calls(Server),
+    TokenCalls = [C || C <- Calls, not maps:is_key(~"method", maps:get(body, C))],
+    %% initial fetch + one refetch after the 401.
+    ?assert(length(TokenCalls) >= 2),
+    gakudan_mcp_client:stop(Pid),
+    mcp_stub_server:stop(Server).
+
+oauth2_second_401_is_terminal(_Config) ->
+    %% Every MCP call 401s: retry-once must give up cleanly, never loop.
+    process_flag(trap_exit, true),
+    Handler = fun
+        (#{~"method" := _}) -> {401, ~"nope"};
+        (_) -> #{~"access_token" => ~"tok", ~"expires_in" => 3600}
+    end,
+    {ok, Server} = mcp_stub_server:start(Handler),
+    Url = stub_url(Server),
+    Result = gakudan_mcp_client:start_link(#{
+        base_url => Url,
+        auth => {oauth2, #{token_url => Url, client_id => ~"c", client_secret => ~"s"}}
+    }),
+    ?assertMatch({error, {handshake_failed, {http_error, 401, _}}}, Result),
+    mcp_stub_server:stop(Server).
+
 as_tools_returns_gakudan_mcp_tool_refs(_Config) ->
     {ok, Server} = mcp_stub_server:start(default_handler()),
     {ok, Pid} = start_client(Server),
@@ -192,6 +302,17 @@ default_handler() ->
             Args = maps:get(~"arguments", Params, #{}),
             Text = handle_tool_call(Name, Args),
             rpc_result(Id, #{content => [#{type => ~"text", text => Text}]})
+    end.
+
+%% Like default_handler, but a non-JSON-RPC body (the form-encoded token
+%% request) gets the OAuth token response.
+oauth_handler(Token) ->
+    Default = default_handler(),
+    fun
+        (#{~"method" := _} = Body) ->
+            Default(Body);
+        (_) ->
+            #{~"access_token" => Token, ~"expires_in" => 3600, ~"token_type" => ~"Bearer"}
     end.
 
 handle_tool_call(~"echo", #{~"msg" := Msg}) ->
