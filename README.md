@@ -199,6 +199,13 @@ default impl uses `kura` and works against any kura backend
 ]}].
 ```
 
+The kura backends ship in companion libraries: add **`kura_postgres`**
+(production) or **`kura_sqlite`** (local / embedded) to your `rebar.config`
+deps - gakudan core is driver-agnostic and pulls no database driver itself.
+gakudan defines the schema as kura migrations (`gakudan_runs`,
+`gakudan_steps`, `gakudan_tool_results`, `gakudan_audit`, under
+`migrations/`); apply them to your database before first use.
+
 Run config can also pass `checkpointer => {Mod, Opts}` per-run to override
 the default. Without a checkpointer, runs behave as in v0.1 (in-memory only).
 
@@ -256,7 +263,9 @@ columns and hashing each row for tamper detection. Events covered:
 guardrail decision (`guardrail_allow` / `guardrail_transform` /
 `guardrail_block`). `on_error` is `log` (warn and continue) or
 `fail_closed` (halt rather than lose a record). With no sink configured
-audit is a no-op. Bring your own sink by implementing the `gakudan_audit`
+audit is a no-op. The default sink uses the same kura backend as the
+checkpointer, so it needs `kura_postgres` / `kura_sqlite` too (see
+Persistence). Bring your own sink by implementing the `gakudan_audit`
 behaviour. Full design in [ADR 0012](docs/adr/0012-audit-logging.md).
 
 ## Cost budgets
@@ -286,6 +295,8 @@ See [ADR 0013](docs/adr/0013-cost-budgets.md).
 | Library | What it adds |
 | --- | --- |
 | [`gakudan_metrics`](https://github.com/Taure/gakudan_metrics) | Prometheus exporter + starter Grafana dashboard. |
+| [`kura_postgres`](https://github.com/Taure/kura_postgres) | Postgres backend for the checkpointer + audit sink. |
+| [`kura_sqlite`](https://github.com/Taure/kura_sqlite) | SQLite backend for local / embedded persistence. |
 | `gakudan_liveboard` (planned) | Real-time human-readable view of runs, via Arizona. |
 
 ## Status
