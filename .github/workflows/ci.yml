@@ -32,3 +32,4 @@ jobs:
       enable-sbom-scan: true
       enable-dependency-submission: true
       enable-summary: true
+      extra-services-compose: 'docker-compose.ci.yml'
