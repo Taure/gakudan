@@ -79,6 +79,7 @@ Swap in `planner_coder:run_stub()` for a two-agent handoff with a tool call.
 | LLM backend | `gakudan_llm` | `anthropic`, `gemini`, `vertex`, `stub` | One callback: `complete(req, opts) -> response`. |
 | Guardrail | `gakudan_guardrail` | bring your own | Allow / block / transform at the LLM boundary. |
 | Audit sink | `gakudan_audit` | `kura` | Durable, synchronous record of lifecycle + policy events. |
+| MCP client | `gakudan_mcp_client` | - | Speaks MCP Streamable HTTP; one gen_server per endpoint; exposes discovered tools for use in agents. |
 
 ## Writing a custom router
 
@@ -134,6 +135,64 @@ via the `model/0` callback.
 Both ship a `run_stub/0` for offline use and a `run/0,1` against the real
 Anthropic API. `debate` also has `eval_stub/0` that drives `gakudan_eval`
 end-to-end.
+
+## MCP client
+
+`gakudan_mcp_client` is a gen_server that speaks the
+[Model Context Protocol](https://modelcontextprotocol.io/) Streamable HTTP
+transport. Start one process per remote MCP server under your application's
+supervision tree:
+
+```erlang
+{ok, _Pid} = gakudan_mcp_client:start_link(#{
+    name      => my_github_mcp,
+    transport => http,
+    base_url  => ~"https://mcp.internal/github",
+    auth      => {bearer, ~"<token>"}
+}).
+```
+
+For OAuth-gated MCP servers, use the OAuth 2.1 client-credentials grant
+instead of a static bearer token:
+
+```erlang
+auth => {oauth2, #{
+    token_url     => ~"https://auth.example.com/oauth/token",
+    client_id     => ~"...",
+    client_secret => ~"...",
+    scope         => ~"mcp.read mcp.tools"   %% optional
+}}
+```
+
+The access token is fetched on first use, cached until expiry (minus a 30s
+skew), and refreshed automatically. A `401` response triggers a one-shot
+refetch-and-retry so a revoked token self-heals without manual intervention.
+
+Use `as_tools/1` to expose all of the server's discovered tools to an agent:
+
+```erlang
+tools() ->
+    [my_local_tool | gakudan_mcp_client:as_tools(my_github_mcp)].
+```
+
+Or reference individual MCP tools by name:
+
+```erlang
+tools() ->
+    [
+        my_local_tool,
+        {gakudan_mcp_tool, #{client => my_github_mcp, name => ~"search_repos"}},
+        {gakudan_mcp_tool, #{client => my_github_mcp, name => ~"read_file"}}
+    ].
+```
+
+Public operations on the client: `list_tools/1`, `get_tool/2`,
+`call_tool/3`, `as_tools/1`, `stop/1`. Tool calls are synchronous; a
+per-tool `timeout_ms` option (default 30 s) cancels the HTTP request and
+returns `{error, timeout}` on a slow server.
+
+See [ADR 0006](docs/adr/0006-mcp-client.md) and
+[ADR 0015](docs/adr/0015-mcp-oauth.md).
 
 ## Evals
 
@@ -292,7 +351,8 @@ See [ADR 0013](docs/adr/0013-cost-budgets.md).
 
 Single-node. Shipped: persistence via the checkpointer behaviour,
 human-in-the-loop interrupt / resume, token-level streaming, parallel agent
-fanout, an MCP client, pluggable guardrails, and synchronous audit logging.
+fanout, an MCP client with OAuth 2.1 client-credentials auth, pluggable
+guardrails, and synchronous audit logging.
 No multi-node distribution (out of scope by design).
 
 ## Why "gakudan"?
