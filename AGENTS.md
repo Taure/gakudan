@@ -1,0 +1,103 @@
+# AGENTS.md
+
+Working agreement for agents and contributors on **gakudan** - multi-agent
+collaboration primitives for the BEAM. A small OTP library: no Nova or Arizona
+in core, no DSL, bring-your-own everything.
+
+## Design pillars
+
+- **Primitives, not a framework.** A handful of behaviours (agent, router,
+  tool, llm) and a supervision tree.
+- **OTP-shaped.** Each run is a supervisor; the run state machine is a
+  `gen_statem`; the blackboard is a `gen_server` owning ETS.
+- **Pluggable everything.** Routers, tools, LLM backends, checkpointers, audit
+  sinks, guardrails, and budgets all swap freely.
+- **Library, not application.** Bring your own dashboard / persistence / auth.
+
+## Scope - what belongs here
+
+- **In:** the behaviours, the run / blackboard / router / turn machinery, the
+  LLM adapters (Anthropic, Gemini, Vertex, stub), streaming, persistence, the
+  MCP client, guardrails, audit, budgets, the examples.
+- **Out:** multi-node distribution; a web dashboard (that is `gakudan_liveboard`);
+  app-specific persistence schemas or auth.
+- **Out forever:** anything that warps the library for a single consumer. If a
+  change is driven by one app's need, it probably belongs in that app. When in
+  doubt, keep gakudan general-purpose.
+
+## Commands
+
+```bash
+rebar3 compile
+rebar3 eunit
+docker compose up -d   # Postgres for the kura suite (gakudan_kura_SUITE)
+rebar3 ct              # skips the kura suite cleanly when no DB is reachable
+rebar3 fmt             # erlfmt (write); CI runs fmt --check
+rebar3 xref
+rebar3 dialyzer
+rebar3 ex_doc          # fix any new warnings
+rebar3 as example shell   # then planner_coder:run_stub(). / debate:run_stub().
+```
+
+## Pre-push checklist
+
+`fmt --check` -> `xref` -> `dialyzer` -> `eunit` -> `ct`, all green.
+
+## Conventions
+
+- OTP 29+. The `~"..."` sigil for binaries, never `<<"...">>`.
+- No `lists:foldl/foldr` - list comprehensions + `maps:from_list`, or explicit
+  named recursion.
+- Logging (where present): `?LOG_*` macros with `#{...}` map reports, never
+  `logger:info/error` format strings.
+- Docs: OTP `-moduledoc` / `-doc`; ex_doc guides under `docs/`.
+- `{vsn, "git"}` in `.app.src` - the version derives from git tags, never
+  hand-edited.
+
+## Architecture
+
+```
+gakudan_sup
+├── gakudan_registry        (ETS map of run_id -> pids)
+└── gakudan_runs_sup        (simple_one_for_one)
+    └── gakudan_run_sup     (per run; one_for_all)
+        ├── gakudan_blackboard   (gen_server + ETS)
+        └── gakudan_run_statem   (gen_statem orchestrator)
+```
+
+A "turn" runs in a short-lived worker spawned from the run statem, so
+cancellation and crash isolation work without blocking the statem. Full map:
+[docs/architecture.md](docs/architecture.md).
+
+## Extension points (behaviours)
+
+`gakudan_agent`, `gakudan_router`, `gakudan_tool`, `gakudan_llm`,
+`gakudan_checkpointer`, `gakudan_audit`, `gakudan_guardrail`, `gakudan_budget`.
+Implement one in your own module and pass it via run config; the built-ins are
+the reference implementations.
+
+## Persistence + audit backends
+
+gakudan core ships no database driver. The kura-backed checkpointer and audit
+sink need a kura backend: add **kura_postgres** (production) or **kura_sqlite**
+(local) and configure a `kura_repo`. The schema ships as kura migrations under
+`migrations/`. See the Persistence and Audit sections of the README.
+
+## Decisions live in ADRs
+
+Before changing a behaviour or a contract, read [docs/adr/](docs/adr/) - it is
+the record of *why*. Write a new ADR (Nygard format) for any new behaviour,
+backend, or contract change. Index: [docs/adr/README.md](docs/adr/README.md).
+
+## Tests
+
+Unit suites use in-memory ETS stubs. `gakudan_kura_SUITE` exercises the real
+kura + kura_postgres stack against Postgres and skips when no DB is reachable.
+`test/agent_a_mod.erl` and `test/agent_b_mod.erl` are minimal fixtures - do not
+add behaviour to them.
+
+## Git and PRs
+
+Conventional commits (`feat:`, `fix:`, `chore:`, `docs:`, `test:`, `refactor:`).
+Always open a PR - never push to `main`. Every merge to `main` tags a release,
+so keep each PR coherent.
