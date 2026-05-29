@@ -18,8 +18,11 @@ Part of a BEAM-native multi-agent stack (all under https://github.com/Taure):
   expose any BEAM service as MCP tools; the server counterpart to this repo's
   MCP client.
 - **[sekisho](https://github.com/Taure/sekisho)** - LLM gateway / control plane:
-  virtual keys, cost ledger, budgets, and audit in front of Anthropic / Gemini
-  / Vertex.
+  virtual keys, budgets, and audit in front of Anthropic + OpenAI (chat **and
+  embeddings**) + Vertex.
+- **[bunko](https://github.com/Taure/bunko)** - agent memory + RAG (pgvector).
+- **[banto](https://github.com/Taure/banto)** - multi-agent repo concierge; the
+  showcase consumer that wires the pillars together.
 
 Sister libs: **gakudan_metrics** (Prometheus + Grafana), **gakudan_otel**
 (OpenTelemetry spans), **gakudan_tickets** + **gakudan_tickets_github**
@@ -27,8 +30,9 @@ Sister libs: **gakudan_metrics** (Prometheus + Grafana), **gakudan_otel**
 
 **This repo** is the runtime at the centre of the stack. It ships the MCP
 *client* (madoguchi is the server side); saiten grades its runs; sekisho can sit
-behind its `gakudan_llm` backends; the sister libs plug into its telemetry,
-ticket, and dashboard seams.
+behind its `gakudan_llm` backends (point `gakudan_llm_anthropic` /
+`gakudan_llm_gemini` at the gateway with a `base_url` opt); the sister libs plug
+into its telemetry, ticket, and dashboard seams.
 
 ## Design pillars
 

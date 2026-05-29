@@ -125,6 +125,15 @@ caching at ~10% of the uncached input-token rate. The Gemini backend
 translates request/response shape transparently; agents declare their model
 via the `model/0` callback.
 
+Both `gakudan_llm_anthropic` and `gakudan_llm_gemini` accept a `base_url` in
+their `Opts`, so a run can route through an LLM gateway / proxy (for example
+[sekisho](https://github.com/Taure/sekisho) for virtual keys, budgets, and
+audit) without any code change:
+
+```erlang
+llm => {gakudan_llm_anthropic, #{base_url => ~"https://sekisho.internal/anthropic"}}
+```
+
 ## Examples
 
 | Example | What it shows |
