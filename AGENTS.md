@@ -4,6 +4,32 @@ Working agreement for agents and contributors on **gakudan** - multi-agent
 collaboration primitives for the BEAM. A small OTP library: no Nova or Arizona
 in core, no DSL, bring-your-own everything.
 
+## Ecosystem
+
+Part of a BEAM-native multi-agent stack (all under https://github.com/Taure):
+
+- **gakudan** - agent orchestration runtime: per-run supervision, pluggable
+  routers/tools/LLM-backends, MCP *client*, persistence, streaming, guardrails,
+  audit, cost budgets.
+- **[saiten](https://github.com/Taure/saiten)** - runtime-agnostic eval/scoring
+  + CI gate: grades any output (a gakudan run, a raw API call, a Claude Code
+  transcript) with deterministic + LLM-judge scorers.
+- **[madoguchi](https://github.com/Taure/madoguchi)** - MCP *server* framework:
+  expose any BEAM service as MCP tools; the server counterpart to this repo's
+  MCP client.
+- **[sekisho](https://github.com/Taure/sekisho)** - LLM gateway / control plane:
+  virtual keys, cost ledger, budgets, and audit in front of Anthropic / Gemini
+  / Vertex.
+
+Sister libs: **gakudan_metrics** (Prometheus + Grafana), **gakudan_otel**
+(OpenTelemetry spans), **gakudan_tickets** + **gakudan_tickets_github**
+(ticket-source adapters), **gakudan_liveboard** (live run dashboard).
+
+**This repo** is the runtime at the centre of the stack. It ships the MCP
+*client* (madoguchi is the server side); saiten grades its runs; sekisho can sit
+behind its `gakudan_llm` backends; the sister libs plug into its telemetry,
+ticket, and dashboard seams.
+
 ## Design pillars
 
 - **Primitives, not a framework.** A handful of behaviours (agent, router,
