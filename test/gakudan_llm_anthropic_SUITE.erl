@@ -16,6 +16,8 @@
     parse_response_omits_cache_fields_when_absent/1,
     parse_response_handles_missing_usage/1,
     no_api_key_returns_error/1,
+    api_url_defaults_to_anthropic/1,
+    api_url_honours_base_url/1,
     sse_parser_splits_complete_events/1,
     sse_parser_holds_partial_event_in_acc/1,
     sse_parser_ignores_event_without_data/1,
@@ -41,6 +43,8 @@ all() ->
         parse_response_omits_cache_fields_when_absent,
         parse_response_handles_missing_usage,
         no_api_key_returns_error,
+        api_url_defaults_to_anthropic,
+        api_url_honours_base_url,
         sse_parser_splits_complete_events,
         sse_parser_holds_partial_event_in_acc,
         sse_parser_ignores_event_without_data,
@@ -179,6 +183,21 @@ no_api_key_returns_error(_Config) ->
         messages => [#{role => user, content => ~"hi"}]
     },
     ?assertEqual({error, no_api_key}, gakudan_llm_anthropic:complete(Req, #{})).
+
+api_url_defaults_to_anthropic(_Config) ->
+    ?assertEqual("https://api.anthropic.com/v1/messages", gakudan_llm_anthropic:api_url(#{})).
+
+api_url_honours_base_url(_Config) ->
+    %% A gateway/proxy origin (+ optional prefix); the backend appends /v1/messages.
+    ?assertEqual(
+        "http://sekisho.internal/anthropic/v1/messages",
+        gakudan_llm_anthropic:api_url(#{base_url => ~"http://sekisho.internal/anthropic"})
+    ),
+    %% A plain string base_url works too.
+    ?assertEqual(
+        "http://localhost:9000/v1/messages",
+        gakudan_llm_anthropic:api_url(#{base_url => "http://localhost:9000"})
+    ).
 
 sse_parser_splits_complete_events(_Config) ->
     Chunk = iolist_to_binary([

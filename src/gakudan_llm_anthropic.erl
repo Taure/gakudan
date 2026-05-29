@@ -6,6 +6,12 @@ Reads the API key from `Opts` (`api_key => ~"sk-ant-..."`) or, if absent, from
 the `ANTHROPIC_API_KEY` env var. Defaults to model `claude-sonnet-4-6`,
 overridable per-request via the agent's `model/0` callback.
 
+Set `base_url => ~"https://..."` in `Opts` to route through an
+Anthropic-compatible gateway or proxy (e.g. an LLM control plane); the backend
+appends `/v1/messages`, so point it at the origin + any prefix. Defaults to
+`https://api.anthropic.com`. The `x-api-key` header carries whatever key you
+pass, so a gateway can authenticate with its own virtual key.
+
 ## Prompt caching
 
 The system prompt and tool definitions are automatically marked with
@@ -27,11 +33,13 @@ to the standard `input_tokens` and `output_tokens`).
 
 -export([complete/2, stream_call/3]).
 -export([build_body/2, parse_response/1, system_with_cache/1, tools_with_cache/1]).
+-export([api_url/1]).
 -export([parse_sse/2, apply_anthropic_event/2]).
 -export([fresh_stream_acc/0, feed_stream_chunk/4, finalise/1]).
 -export_type([sse_acc/0, stream_acc/0]).
 
--define(API_URL, "https://api.anthropic.com/v1/messages").
+-define(DEFAULT_BASE_URL, "https://api.anthropic.com").
+-define(MESSAGES_PATH, "/v1/messages").
 -define(VERSION, "2023-06-01").
 -define(DEFAULT_MAX_TOKENS, 4096).
 -define(DEFAULT_TIMEOUT, 60_000).
@@ -49,7 +57,7 @@ do_complete(ApiKey, Req, Opts) ->
         {"x-api-key", binary_to_list(ApiKey)},
         {"anthropic-version", ?VERSION}
     ],
-    Request = {?API_URL, Headers, "application/json", iolist_to_binary(json:encode(Body))},
+    Request = {api_url(Opts), Headers, "application/json", iolist_to_binary(json:encode(Body))},
     Timeout = maps:get(timeout, Opts, ?DEFAULT_TIMEOUT),
     case httpc:request(post, Request, [{timeout, Timeout}], [{body_format, binary}]) of
         {ok, {{_, 200, _}, _RespHdrs, RespBody}} ->
@@ -136,6 +144,12 @@ parse_block(#{~"type" := ~"tool_use", ~"id" := Id, ~"name" := Name, ~"input" := 
 parse_block(Other) ->
     Other.
 
+api_url(Opts) ->
+    to_list(maps:get(base_url, Opts, ?DEFAULT_BASE_URL)) ++ ?MESSAGES_PATH.
+
+to_list(B) when is_binary(B) -> binary_to_list(B);
+to_list(L) when is_list(L) -> L.
+
 api_key(#{api_key := K}) when is_binary(K) -> K;
 api_key(_) ->
     case os:getenv("ANTHROPIC_API_KEY") of
@@ -184,7 +198,7 @@ do_stream(ApiKey, Req, Opts, Subscriber) ->
         {"anthropic-version", ?VERSION},
         {"accept", "text/event-stream"}
     ],
-    Request = {?API_URL, Headers, "application/json", iolist_to_binary(json:encode(Body))},
+    Request = {api_url(Opts), Headers, "application/json", iolist_to_binary(json:encode(Body))},
     Timeout = maps:get(timeout, Opts, ?DEFAULT_TIMEOUT),
     Ref = maps:get(stream_request_id, Opts),
     Subscriber ! {gakudan_llm_stream, Ref, {start, #{model => maps:get(model, Req)}}},
