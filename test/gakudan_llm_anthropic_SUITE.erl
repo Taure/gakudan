@@ -11,6 +11,10 @@
     only_last_tool_gets_cache_control/1,
     build_body_caches_system_and_tools/1,
     build_body_with_no_tools_omits_tools_key/1,
+    build_body_threads_generation_options/1,
+    build_body_request_max_tokens_overrides_opts/1,
+    build_body_tool_choice_variants/1,
+    build_body_response_format_adds_structured_tool/1,
     parse_response_surfaces_cache_creation_tokens/1,
     parse_response_surfaces_cache_read_tokens/1,
     parse_response_omits_cache_fields_when_absent/1,
@@ -38,6 +42,10 @@ all() ->
         only_last_tool_gets_cache_control,
         build_body_caches_system_and_tools,
         build_body_with_no_tools_omits_tools_key,
+        build_body_threads_generation_options,
+        build_body_request_max_tokens_overrides_opts,
+        build_body_tool_choice_variants,
+        build_body_response_format_adds_structured_tool,
         parse_response_surfaces_cache_creation_tokens,
         parse_response_surfaces_cache_read_tokens,
         parse_response_omits_cache_fields_when_absent,
@@ -114,6 +122,77 @@ build_body_with_no_tools_omits_tools_key(_Config) ->
         #{}
     ),
     ?assertNot(maps:is_key(tools, Body)).
+
+build_body_threads_generation_options(_Config) ->
+    Body = gakudan_llm_anthropic:build_body(
+        #{
+            model => ~"claude-sonnet-4-6",
+            system => ~"sys",
+            tools => [],
+            messages => [#{role => user, content => ~"hi"}],
+            temperature => 0.2,
+            stop_sequences => [~"STOP"],
+            max_tokens => 256
+        },
+        #{}
+    ),
+    ?assertEqual(0.2, maps:get(temperature, Body)),
+    ?assertEqual([~"STOP"], maps:get(stop_sequences, Body)),
+    ?assertEqual(256, maps:get(max_tokens, Body)).
+
+build_body_request_max_tokens_overrides_opts(_Config) ->
+    Body = gakudan_llm_anthropic:build_body(
+        #{
+            model => ~"claude-sonnet-4-6",
+            system => ~"sys",
+            tools => [],
+            messages => [#{role => user, content => ~"hi"}],
+            max_tokens => 99
+        },
+        #{max_tokens => 4096}
+    ),
+    ?assertEqual(99, maps:get(max_tokens, Body)).
+
+build_body_tool_choice_variants(_Config) ->
+    Mk = fun(Choice) ->
+        Body = gakudan_llm_anthropic:build_body(
+            #{
+                model => ~"m",
+                system => ~"sys",
+                tools => [#{name => ~"echo", description => ~"E", input_schema => #{}}],
+                messages => [#{role => user, content => ~"hi"}],
+                tool_choice => Choice
+            },
+            #{}
+        ),
+        maps:get(tool_choice, Body)
+    end,
+    ?assertEqual(#{type => ~"auto"}, Mk(auto)),
+    ?assertEqual(#{type => ~"any"}, Mk(any)),
+    ?assertEqual(#{type => ~"none"}, Mk(none)),
+    ?assertEqual(#{type => ~"tool", name => ~"echo"}, Mk({tool, ~"echo"})).
+
+build_body_response_format_adds_structured_tool(_Config) ->
+    Schema = #{
+        type => ~"object",
+        properties => #{score => #{type => ~"integer"}},
+        required => [~"score"]
+    },
+    Body = gakudan_llm_anthropic:build_body(
+        #{
+            model => ~"m",
+            system => ~"sys",
+            tools => [],
+            messages => [#{role => user, content => ~"hi"}],
+            response_format => Schema
+        },
+        #{}
+    ),
+    Name = gakudan_llm_anthropic:structured_output_tool_name(),
+    ?assertEqual(#{type => ~"tool", name => Name}, maps:get(tool_choice, Body)),
+    [Tool] = maps:get(tools, Body),
+    ?assertEqual(Name, maps:get(name, Tool)),
+    ?assertEqual(Schema, maps:get(input_schema, Tool)).
 
 parse_response_surfaces_cache_creation_tokens(_Config) ->
     Body = iolist_to_binary(

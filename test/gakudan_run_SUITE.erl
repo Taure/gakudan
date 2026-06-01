@@ -7,7 +7,8 @@
     round_robin_two_agents/1,
     handoff_stops_when_no_token/1,
     handoff_follows_agent_mention/1,
-    fanout_runs_all_agents/1
+    fanout_runs_all_agents/1,
+    context_transform_runs_before_turn/1
 ]).
 
 all() ->
@@ -16,7 +17,8 @@ all() ->
         round_robin_two_agents,
         handoff_stops_when_no_token,
         handoff_follows_agent_mention,
-        fanout_runs_all_agents
+        fanout_runs_all_agents,
+        context_transform_runs_before_turn
     ].
 
 init_per_suite(Config) ->
@@ -83,6 +85,27 @@ fanout_runs_all_agents(_Config) ->
     {ok, Entries} = gakudan:await(RunId, 5000),
     AgentRoles = lists:sort([R || #{role := {agent, _} = R} <- Entries]),
     [{agent, agent_a}, {agent, agent_b}] = AgentRoles,
+    ok = gakudan:stop(RunId),
+    gen_server:stop(Script).
+
+context_transform_runs_before_turn(_Config) ->
+    {ok, Script} = gakudan_llm_stub_script:start_link([{text, ~"ok"}]),
+    Self = self(),
+    {ok, _Sup, RunId} = gakudan:start_run(#{
+        agents => [agent_a_mod],
+        router => {gakudan_router_round_robin, #{}},
+        llm => {gakudan_llm_stub, #{script_owner => Script}},
+        context => {recording_context_mod, #{notify => Self, keep => 1}},
+        max_turns => 1
+    }),
+    ok = gakudan:send(RunId, ~"hello"),
+    {ok, _Entries} = gakudan:await(RunId, 5000),
+    receive
+        {context_compacted, N} ->
+            true = N >= 1
+    after 2000 ->
+        ct:fail(context_hook_not_invoked)
+    end,
     ok = gakudan:stop(RunId),
     gen_server:stop(Script).
 

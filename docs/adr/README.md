@@ -34,3 +34,10 @@ with a new one.
 | [0013](0013-cost-budgets.md) | Cost budgets |
 | [0014](0014-streaming-cancellation-backpressure.md) | Streaming cancellation + backpressure |
 | [0015](0015-mcp-oauth.md) | MCP OAuth 2.1 |
+| [0016](0016-llm-request-options.md) | LLM request options |
+| [0017](0017-structured-output-validation.md) | Structured output and validation |
+| [0018](0018-resilient-llm-backends.md) | Resilient LLM backends (fallback + retry) |
+| [0019](0019-context-compaction.md) | Context compaction hook |
+| [0020](0020-parallel-tool-calls.md) | Parallel tool calls within a turn |
+| [0021](0021-fork-from-checkpoint.md) | Fork from checkpoint |
+| [0022](0022-loop-and-auto-routers.md) | Loop and auto (LLM-select) routers |

@@ -28,6 +28,7 @@
     checkpointer :: undefined | {module(), term()},
     audit = undefined :: gakudan_audit:handle(),
     actor = #{} :: map(),
+    context = undefined :: undefined | gakudan_context:ref(),
     budget = undefined :: undefined | gakudan_budget:ref(),
     used = #{tokens_in => 0, tokens_out => 0, llm_calls => 0} :: gakudan_turn:usage(),
     stopped = undefined :: undefined | term(),
@@ -112,6 +113,7 @@ init({fresh, RunSup, Config}) ->
         checkpointer = Checkpointer,
         audit = init_audit(Config),
         actor = maps:get(actor, Config, #{}),
+        context = init_context(Config),
         budget = init_budget(Config),
         start_time = erlang:monotonic_time()
     },
@@ -149,6 +151,7 @@ init({resume, RunSup, Config, Snapshot}) ->
         checkpointer = Checkpointer,
         audit = init_audit(Config),
         actor = maps:get(actor, Config, #{}),
+        context = init_context(Config),
         budget = init_budget(Config),
         start_time = erlang:monotonic_time()
     },
@@ -371,7 +374,8 @@ spawn_worker(AgentId, TurnNumber, Data) ->
         checkpointer = Checkpointer,
         guardrails = Guardrails,
         audit = Audit,
-        actor = Actor
+        actor = Actor,
+        context = Context
     } = Data,
     {AgentMod, _AgentOpts} = maps:get(AgentId, Agents),
     Self = self(),
@@ -391,7 +395,7 @@ spawn_worker(AgentId, TurnNumber, Data) ->
                     BB,
                     Stream,
                     Guardrails,
-                    #{audit => Audit, actor => Actor}
+                    #{audit => Audit, actor => Actor, context => Context}
                 )
             of
                 {ok, Usage} -> Self ! {turn_done, self(), Usage};
@@ -589,6 +593,12 @@ init_audit(Config) ->
 init_budget(Config) ->
     case maps:get(budget, Config, undefined) of
         undefined -> application:get_env(gakudan, default_budget, undefined);
+        Ref -> Ref
+    end.
+
+init_context(Config) ->
+    case maps:get(context, Config, undefined) of
+        undefined -> application:get_env(gakudan, default_context, undefined);
         Ref -> Ref
     end.
 

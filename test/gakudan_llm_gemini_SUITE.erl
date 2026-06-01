@@ -12,6 +12,9 @@
     tool_result_recovers_name_from_prior_tool_use/1,
     tool_result_with_unknown_id_falls_back/1,
     tools_translate_to_function_declarations/1,
+    generation_options_land_in_generation_config/1,
+    tool_choice_maps_to_function_calling_config/1,
+    response_format_maps_to_response_schema/1,
     response_text_only_is_end_turn/1,
     response_with_function_call_is_tool_use/1,
     response_usage_is_forwarded/1,
@@ -38,6 +41,9 @@ all() ->
         tool_result_recovers_name_from_prior_tool_use,
         tool_result_with_unknown_id_falls_back,
         tools_translate_to_function_declarations,
+        generation_options_land_in_generation_config,
+        tool_choice_maps_to_function_calling_config,
+        response_format_maps_to_response_schema,
         response_text_only_is_end_turn,
         response_with_function_call_is_tool_use,
         response_usage_is_forwarded,
@@ -186,6 +192,59 @@ tools_translate_to_function_declarations(_Config) ->
     ?assertEqual(~"echo_tool", maps:get(name, Decl)),
     ?assertEqual(~"Echoes input.", maps:get(description, Decl)),
     ?assertMatch(#{type := ~"object"}, maps:get(parameters, Decl)).
+
+generation_options_land_in_generation_config(_Config) ->
+    Body = gakudan_llm_gemini:build_body(
+        #{
+            model => ~"gemini-2.5-flash",
+            system => <<>>,
+            tools => [],
+            messages => [#{role => user, content => ~"hi"}],
+            temperature => 0.5,
+            stop_sequences => [~"END"],
+            max_tokens => 128
+        },
+        #{}
+    ),
+    Cfg = maps:get(generationConfig, Body),
+    ?assertEqual(0.5, maps:get(temperature, Cfg)),
+    ?assertEqual([~"END"], maps:get(stopSequences, Cfg)),
+    ?assertEqual(128, maps:get(maxOutputTokens, Cfg)).
+
+tool_choice_maps_to_function_calling_config(_Config) ->
+    Mk = fun(Choice) ->
+        Body = gakudan_llm_gemini:build_body(
+            #{
+                model => ~"m",
+                system => <<>>,
+                tools => [#{name => ~"echo", description => ~"E", input_schema => #{}}],
+                messages => [#{role => user, content => ~"hi"}],
+                tool_choice => Choice
+            },
+            #{}
+        ),
+        maps:get(functionCallingConfig, maps:get(toolConfig, Body))
+    end,
+    ?assertEqual(#{mode => ~"AUTO"}, Mk(auto)),
+    ?assertEqual(#{mode => ~"ANY"}, Mk(any)),
+    ?assertEqual(#{mode => ~"NONE"}, Mk(none)),
+    ?assertEqual(#{mode => ~"ANY", allowedFunctionNames => [~"echo"]}, Mk({tool, ~"echo"})).
+
+response_format_maps_to_response_schema(_Config) ->
+    Schema = #{type => ~"object", properties => #{x => #{type => ~"integer"}}},
+    Body = gakudan_llm_gemini:build_body(
+        #{
+            model => ~"m",
+            system => <<>>,
+            tools => [],
+            messages => [#{role => user, content => ~"hi"}],
+            response_format => Schema
+        },
+        #{}
+    ),
+    Cfg = maps:get(generationConfig, Body),
+    ?assertEqual(~"application/json", maps:get(responseMimeType, Cfg)),
+    ?assertEqual(Schema, maps:get(responseSchema, Cfg)).
 
 response_text_only_is_end_turn(_Config) ->
     Body = iolist_to_binary(
