@@ -355,9 +355,8 @@ start_fanout(AgentIds, Data0) ->
     Base = Data0#data.turn,
     Data = Data0#data{fanout = #{base => Base, agents => AgentIds}},
     save_snapshot(running, Data),
-    Indexed = lists:zip(lists:seq(1, length(AgentIds)), AgentIds),
     Workers = maps:from_list(
-        [spawn_worker(AgentId, Base + I, Data) || {I, AgentId} <- Indexed]
+        [spawn_worker(AgentId, Base + I, Data) || {I, AgentId} <- lists:enumerate(AgentIds)]
     ),
     {next_state, running, Data#data{turn_workers = Workers}}.
 
