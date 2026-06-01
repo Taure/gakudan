@@ -115,7 +115,14 @@ loop(Ctx, Msgs, N, Usage) ->
         {ok, GuardedMsgs} ->
             Req = #{model => Model, system => Sys, tools => Tools, messages => GuardedMsgs},
             case complete_with_idempotency(Ctx, N, Req) of
-                {ok, #{stop_reason := end_turn, content := Content} = Resp} ->
+                {ok, #{stop_reason := tool_use, content := Content} = Resp} ->
+                    Usage1 = add_usage(Usage, Resp),
+                    ToolUses = [B || #{type := tool_use} = B <- Content],
+                    ToolResults = run_tools(Ctx, N, ResolvedTools, ToolUses),
+                    AssistantTurn = #{role => assistant, content => Content},
+                    UserTurn = #{role => user, content => ToolResults},
+                    loop(Ctx, Msgs ++ [AssistantTurn, UserTurn], N + 1, Usage1);
+                {ok, #{content := Content} = Resp} ->
                     Usage1 = add_usage(Usage, Resp),
                     case guard(Ctx, output, collect_text(Content)) of
                         {block, Block} ->
@@ -125,13 +132,6 @@ loop(Ctx, Msgs, N, Usage) ->
                             {ok, _} = gakudan_blackboard:append(BB, {agent, AgentId}, Text),
                             {ok, Usage1}
                     end;
-                {ok, #{stop_reason := tool_use, content := Content} = Resp} ->
-                    Usage1 = add_usage(Usage, Resp),
-                    ToolUses = [B || #{type := tool_use} = B <- Content],
-                    ToolResults = run_tools(Ctx, N, ResolvedTools, ToolUses),
-                    AssistantTurn = #{role => assistant, content => Content},
-                    UserTurn = #{role => user, content => ToolResults},
-                    loop(Ctx, Msgs ++ [AssistantTurn, UserTurn], N + 1, Usage1);
                 {error, cancelled} ->
                     {cancelled, Usage};
                 {error, Reason} ->
@@ -373,29 +373,27 @@ transcript_to_messages(Entries, Self) ->
     %% Map blackboard log into Anthropic-style role/content messages.
     %% Self's prior turns -> assistant; others (user + other agents + system) -> user
     %% (with a small prefix identifying speaker).
-    lists:map(
-        fun(#{role := Role, content := Content}) ->
-            case Role of
-                {agent, Self} ->
-                    #{role => assistant, content => to_text(Content)};
-                {agent, Other} ->
-                    #{
-                        role => user,
-                        content => iolist_to_binary([
-                            "[", atom_to_binary(Other), "]: ", to_text(Content)
-                        ])
-                    };
-                user ->
-                    #{role => user, content => to_text(Content)};
-                system ->
-                    #{
-                        role => user,
-                        content => iolist_to_binary([~"[system]: ", to_text(Content)])
-                    }
-            end
-        end,
-        Entries
-    ).
+    [
+        case Role of
+            {agent, Self} ->
+                #{role => assistant, content => to_text(Content)};
+            {agent, Other} ->
+                #{
+                    role => user,
+                    content => iolist_to_binary([
+                        "[", atom_to_binary(Other), "]: ", to_text(Content)
+                    ])
+                };
+            user ->
+                #{role => user, content => to_text(Content)};
+            system ->
+                #{
+                    role => user,
+                    content => iolist_to_binary([~"[system]: ", to_text(Content)])
+                }
+        end
+     || #{role := Role, content := Content} <- Entries
+    ].
 
 to_text(B) when is_binary(B) -> B;
 to_text(L) when is_list(L) -> iolist_to_binary(io_lib:format("~p", [L])).
@@ -409,22 +407,20 @@ run_tools(Ctx, Iter, ResolvedTools, ToolUses) ->
         {maps:get(name, maps:get(spec, R)), R}
      || R <- ResolvedTools
     ]),
-    lists:map(
-        fun(#{id := Id, name := Name, input := Input}) ->
-            case maps:find(Name, NameMap) of
-                {ok, Resolved} ->
-                    tool_result_block(Id, run_one_tool(Ctx, Iter, Id, Name, Resolved, Input));
-                error ->
-                    #{
-                        type => tool_result,
-                        tool_use_id => Id,
-                        is_error => true,
-                        content => <<"unknown tool: ", Name/binary>>
-                    }
-            end
-        end,
-        ToolUses
-    ).
+    [
+        case maps:find(Name, NameMap) of
+            {ok, Resolved} ->
+                tool_result_block(Id, run_one_tool(Ctx, Iter, Id, Name, Resolved, Input));
+            error ->
+                #{
+                    type => tool_result,
+                    tool_use_id => Id,
+                    is_error => true,
+                    content => <<"unknown tool: ", Name/binary>>
+                }
+        end
+     || #{id := Id, name := Name, input := Input} <- ToolUses
+    ].
 
 %% Run a single tool, caching its result under a deterministic key so a
 %% resumed turn replays the result instead of re-running the tool (ADR
