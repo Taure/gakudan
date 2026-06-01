@@ -108,29 +108,29 @@ host apps run `rebar3 kura compile` against their configured repo.
 
 Per snapshot, in `run_snapshot()`:
 
-- `run_id` — primary key.
-- `status` — coarse lifecycle: pending → running ↔ idle ↔ awaiting_human → completed.
+- `run_id` - primary key.
+- `status` - coarse lifecycle: pending → running ↔ idle ↔ awaiting_human → completed.
   Drives resumer behaviour.
-- `config` — full `gakudan:run_config()` map as supplied to `start_run/1`,
+- `config` - full `gakudan:run_config()` map as supplied to `start_run/1`,
   minus secrets. The LLM `Opts` portion is **not** persisted (see
   Consequences); the host app re-supplies it on resume.
-- `last_step` — monotonically-increasing step counter for idempotency.
-- `blackboard` — entries list and KV map captured by snapshotting the
+- `last_step` - monotonically-increasing step counter for idempotency.
+- `blackboard` - entries list and KV map captured by snapshotting the
   blackboard process.
-- `router_state` — opaque term returned by `RouterMod:next/2`.
-- `statem_state` — name of the current gen_statem state.
-- `turn` — current turn number.
-- `updated_at` — `erlang:system_time(millisecond)`.
+- `router_state` - opaque term returned by `RouterMod:next/2`.
+- `statem_state` - name of the current gen_statem state.
+- `turn` - current turn number.
+- `updated_at` - `erlang:system_time(millisecond)`.
 
 Per step record:
 
-- `run_id`, `step_id` — composite key. `step_id` is
+- `run_id`, `step_id` - composite key. `step_id` is
   `<<TurnNo:64, AgentId:binary>>` (BLAKE2b hash of the concatenation in
   practice; see ADR 0004 for the exact derivation).
-- `request`, `response` — `term_to_binary` of the inbound LLM request
+- `request`, `response` - `term_to_binary` of the inbound LLM request
   and response normalised maps.
-- `usage` — token counts as a queryable map column for cost reporting.
-- `inserted_at` — `erlang:system_time(millisecond)`.
+- `usage` - token counts as a queryable map column for cost reporting.
+- `inserted_at` - `erlang:system_time(millisecond)`.
 
 ### What we deliberately do not persist
 
