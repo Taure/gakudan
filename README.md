@@ -248,7 +248,7 @@ end, undefined).
 Full event surface in [`docs/adr/0001-telemetry-events.md`](docs/adr/0001-telemetry-events.md);
 public API from v0.1 onward.
 
-## Persistence (v0.2)
+## Persistence
 
 Runs survive a BEAM restart when a checkpointer is configured. The
 default impl uses `kura` and works against any kura backend
@@ -275,7 +275,7 @@ gakudan defines the schema as kura migrations (`gakudan_runs`,
 `migrations/`); apply them to your database before first use.
 
 Run config can also pass `checkpointer => {Mod, Opts}` per-run to override
-the default. Without a checkpointer, runs behave as in v0.1 (in-memory only).
+the default. Without a checkpointer, runs are in-memory only.
 
 `gakudan:interrupt(RunId, Reason)` pauses a run and persists the
 snapshot. `gakudan:resume(RunId, Payload)` hands a `user`-role entry back
@@ -284,7 +284,7 @@ to the loop. See [ADR 0004](docs/adr/0004-resume-interrupt-idempotency.md).
 `initial_messages` on `start_run/1` lets callers inject RAG output / doc
 grounding into the blackboard before the first turn fires.
 
-## Streaming (v0.3)
+## Streaming
 
 Subscribe to a run to receive token-by-token deltas as they arrive from
 the backend:

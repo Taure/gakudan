@@ -51,21 +51,21 @@ adapter), but the default is stub-only and offline.
 
 A small, finite set of matchers. Adding new ones is a minor-version bump.
 
-- `{outcome, idle | running | completed}` — final state of the run.
-- `{min_turns, N}` / `{max_turns, N}` — bounds on `[gakudan, turn, stop]`
+- `{outcome, idle | running | completed}` - final state of the run.
+- `{min_turns, N}` / `{max_turns, N}` - bounds on `[gakudan, turn, stop]`
   count.
-- `{agent_turn_contains, AgentId, Substring}` — at least one transcript
+- `{agent_turn_contains, AgentId, Substring}` - at least one transcript
   entry from that agent contains the substring.
-- `{agent_turn_count, AgentId, N}` — exact number of transcript entries
+- `{agent_turn_count, AgentId, N}` - exact number of transcript entries
   from that agent.
-- `{tokens_input_at_least, N}` / `{tokens_output_at_least, N}` — sums of
+- `{tokens_input_at_least, N}` / `{tokens_output_at_least, N}` - sums of
   `tokens_in` / `tokens_out` measurements across
   `[gakudan, llm, request, stop]` events.
-- `{tool_called, ToolName}` — at least one `[gakudan, tool, run, stop]`
+- `{tool_called, ToolName}` - at least one `[gakudan, tool, run, stop]`
   with that tool name.
-- `no_failed_turns` — zero `[gakudan, turn, stop]` events with
+- `no_failed_turns` - zero `[gakudan, turn, stop]` events with
   `outcome => failed`.
-- `{transcript_min_length, N}` — bound on total entries.
+- `{transcript_min_length, N}` - bound on total entries.
 
 Unknown expectation atoms are themselves failures. Cases catch typos
 without silently passing.

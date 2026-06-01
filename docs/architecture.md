@@ -1,6 +1,8 @@
 # Architecture
 
-`gakudan` is a small OTP library built around five pluggable concepts.
+`gakudan` is a small OTP library built around a handful of pluggable concepts.
+The core five are below; checkpointers, audit sinks, guardrails, and budgets
+are the same shape - a behaviour with a built-in reference implementation.
 
 ## Concepts
 
@@ -15,15 +17,14 @@ entire subtree is torn down.
 
 An *agent* is a callback module implementing `gakudan_agent`. It declares an
 id, a system prompt, a list of tools, and a model. Agents do not have their
-own gen_statem in v0.1; the run state machine drives turns directly using
-the agent's callbacks. This may change in v0.2 if streaming or stateful
-agents are needed.
+own gen_statem; the run state machine drives turns directly using the agent's
+callbacks.
 
 ### Router
 
 A *router* is a behaviour module that decides whose turn is next given the
 current transcript. Routers are stateful and the state is threaded through
-the run state machine. The library ships three:
+the run state machine. The library ships four:
 
 - `gakudan_router_round_robin` - cycles through agents, useful for
   brainstorming or alternating critique/edit loops.
@@ -31,6 +32,8 @@ the run state machine. The library ships three:
   emitting an `@<agent>` token. Useful for "specialist passing the baton".
 - `gakudan_router_manager` - a manager agent picks the next worker each
   round. Useful for team-lead/specialist topologies.
+- `gakudan_router_fanout` - runs every agent concurrently, one parallel
+  round at a time. Useful for ensemble / poll / map topologies.
 
 ### Blackboard
 
@@ -43,16 +46,20 @@ messages, suitable for a dashboard or audit log.
 
 A *tool* is a callback module implementing `gakudan_tool`. It exposes a JSON
 schema to the LLM via `spec/0` and runs synchronously via `run/1`. Tools are
-currently dispatched in-process during a turn. Long-running or expensive
-tools should be wrapped behind an async dispatcher (e.g. via shigoto) in
-your own code for v0.1.
+dispatched in-process during a turn. Long-running or expensive tools should
+be wrapped behind an async dispatcher in your own code.
 
 ### LLM backend
 
 An *LLM backend* implements `gakudan_llm`. The library ships:
 
-- `gakudan_llm_anthropic` - non-streaming Anthropic Messages API adapter.
+- `gakudan_llm_anthropic` - Anthropic Messages API adapter.
+- `gakudan_llm_gemini` - Google Gemini adapter.
+- `gakudan_llm_vertex` - Google Vertex AI adapter.
 - `gakudan_llm_stub` - deterministic stub for tests and offline demos.
+
+Backends implement `complete/2`; those that also implement `stream_call/3`
+deliver token-level deltas, and the rest fall back to a single delta.
 
 ## Process tree
 
@@ -113,8 +120,8 @@ events without coupling to gakudan internals.
 
 ## What this library is not
 
-- Not a workflow engine. There is no DAG, no persistence, no retry on
-  process restart (the run_sup is `temporary`).
-- Not a multi-node coordinator. v0.1 is single-node.
+- Not a workflow engine. There is no DAG. Persistence is opt-in via a
+  checkpointer; without one, a run is in-memory only.
+- Not a multi-node coordinator. Single-node by design.
 - Not a UI. A companion `gakudan_liveboard` (Arizona) is planned.
 - Not opinionated about which LLM you use. Bring your own backend module.

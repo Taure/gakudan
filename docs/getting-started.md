@@ -2,14 +2,14 @@
 
 This guide takes you from "no project" to "your own three-agent pipeline running
 against the real Anthropic API". The 60-second tour in the [README](../README.md)
-is the prerequisite — read it first so you have the included demos in your head.
+is the prerequisite - read it first so you have the included demos in your head.
 
 ## Add gakudan to your project
 
 ```erlang
 %% rebar.config
 {deps, [
-    {gakudan, {git, "https://github.com/Taure/gakudan.git", {tag, "v0.1.4"}}}
+    {gakudan, {git, "https://github.com/Taure/gakudan.git", {tag, "v0.1.35"}}}
 ]}.
 ```
 
@@ -24,7 +24,7 @@ That's it. Gakudan boots its supervision tree the moment you call
 
 ## Your first agent
 
-An agent is just an Erlang module implementing the `gakudan_agent` behaviour —
+An agent is just an Erlang module implementing the `gakudan_agent` behaviour -
 four callbacks, no state.
 
 ```erlang
@@ -47,7 +47,7 @@ model() -> ~"claude-sonnet-4-6".
 ```
 
 `id/0` is the atom the router uses to refer to this agent. It does **not** have
-to match the module name — `my_app_agent_risk` can declare `id() -> risk` and
+to match the module name - `my_app_agent_risk` can declare `id() -> risk` and
 the router will see it as `risk`.
 
 ## Run it
@@ -62,7 +62,7 @@ ok = gakudan:send(RunId, ~"Write me a TCP echo server in Erlang."),
 {ok, Entries} = gakudan:await(RunId, 5_000).
 ```
 
-`gakudan_llm_stub` returns the next response from `script` on each call — no
+`gakudan_llm_stub` returns the next response from `script` on each call - no
 network, no key, fully deterministic. Use it everywhere you would otherwise
 need a real model: in unit tests, in CI, in evals.
 
@@ -103,7 +103,7 @@ ok = gakudan:send(RunId, ~"Write me a TCP echo server."),
 {ok, Entries} = gakudan:await(RunId, 60_000).
 ```
 
-`Entries` is the full transcript: a list of `#{role, agent, content, ...}`
+`Entries` is the full transcript: a list of `#{seq, role, content, ts}`
 maps you can render or inspect.
 
 ## Add a tool
@@ -168,11 +168,11 @@ coder) in the same run.
 
 ## What to read next
 
-- [`architecture.md`](architecture.md) — the supervision tree, the
+- [`architecture.md`](architecture.md) - the supervision tree, the
   blackboard, and how a turn actually executes.
-- [`examples/debate`](../examples/debate) — three agents, a custom router,
+- [`examples/debate`](../examples/debate) - three agents, a custom router,
   and an eval suite. The 60-second tour example.
-- [`examples/planner_coder`](../examples/planner_coder) — the two-agent
+- [`examples/planner_coder`](../examples/planner_coder) - the two-agent
   handoff with a tool, real-world shape.
-- The `gakudan_eval` module — drives a run with a scripted LLM and asserts
+- The `gakudan_eval` module - drives a run with a scripted LLM and asserts
   against the transcript. Drop-in for CT or eunit, zero API cost.
