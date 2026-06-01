@@ -16,7 +16,7 @@ it transparently fall back to `complete/2` wrapped in a single
 
 -export([stream/4]).
 
--export_type([request/0, response/0, content_block/0, usage/0, stream_event/0]).
+-export_type([request/0, response/0, content_block/0, usage/0, stream_event/0, tool_choice/0]).
 
 -type content_block() ::
     #{type := text, text := binary()}
@@ -29,11 +29,22 @@ it transparently fall back to `complete/2` wrapped in a single
     cache_read_input_tokens => non_neg_integer()
 }.
 
+-type tool_choice() ::
+    auto
+    | any
+    | none
+    | {tool, binary()}.
+
 -type request() :: #{
     model := binary(),
     system := binary(),
     tools := [gakudan_tool:spec()],
-    messages := [map()]
+    messages := [map()],
+    tool_choice => tool_choice(),
+    response_format => map(),
+    max_tokens => pos_integer(),
+    temperature => number(),
+    stop_sequences => [binary()]
 }.
 
 -type response() :: #{

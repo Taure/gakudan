@@ -102,9 +102,22 @@ cancellation and crash isolation work without blocking the statem. Full map:
 ## Extension points (behaviours)
 
 `gakudan_agent`, `gakudan_router`, `gakudan_tool`, `gakudan_llm`,
-`gakudan_checkpointer`, `gakudan_audit`, `gakudan_guardrail`, `gakudan_budget`.
-Implement one in your own module and pass it via run config; the built-ins are
-the reference implementations.
+`gakudan_validator`, `gakudan_context`, `gakudan_checkpointer`,
+`gakudan_audit`, `gakudan_guardrail`, `gakudan_budget`. Implement one in your
+own module and pass it via run config; the built-ins are the reference
+implementations.
+
+Composable LLM backends (`gakudan_llm_fallback`, `gakudan_llm_retry`) and the
+extra routers (`gakudan_router_loop`, `gakudan_router_auto`) are themselves
+built on these behaviours - resilience and control-flow shapes live as
+backends/routers, never as warps to core. Per-request generation options
+(`tool_choice`, `response_format`, `max_tokens`, `temperature`,
+`stop_sequences`, plus a `validator`) ride on an agent's optional
+`request_options/0` callback; structured output is validated and exposed on
+the blackboard under `structured_output`. A `context` transform compacts the
+transcript before each LLM call. Tool calls within a turn run in parallel on
+monitored workers, preserving block order. `start_run/1` accepts
+`fork_from => {RunId, StepId}` to branch from a checkpoint.
 
 ## Persistence + audit backends
 

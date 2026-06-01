@@ -55,23 +55,68 @@ do_complete(ApiKey, Req, Opts) ->
             {error, Reason}
     end.
 
--doc "Build the JSON-encodable Gemini request body from a gakudan request.".
-build_body(#{system := Sys, tools := Tools, messages := Msgs}, Opts) ->
+-doc """
+Build the JSON-encodable Gemini request body from a gakudan request.
+
+Optional `t:gakudan_llm:request/0` fields map to their Gemini equivalents:
+`max_tokens` -> `maxOutputTokens`, `temperature` -> `temperature`,
+`stop_sequences` -> `stopSequences`, `tool_choice` ->
+`toolConfig.functionCallingConfig`, and `response_format` ->
+`responseMimeType: application/json` + `responseSchema`.
+""".
+build_body(#{system := Sys, tools := Tools, messages := Msgs} = Req, Opts) ->
     Base = #{
         contents => translate_messages(Msgs),
-        generationConfig => #{
-            maxOutputTokens => maps:get(max_tokens, Opts, ?DEFAULT_MAX_TOKENS)
-        }
+        generationConfig => generation_config(Req, Opts)
     },
     Base1 =
         case Sys of
             <<>> -> Base;
             _ -> Base#{systemInstruction => #{parts => [#{text => Sys}]}}
         end,
-    case Tools of
-        [] -> Base1;
-        _ -> Base1#{tools => translate_tools(Tools)}
+    Base2 =
+        case Tools of
+            [] -> Base1;
+            _ -> Base1#{tools => translate_tools(Tools)}
+        end,
+    maybe_tool_config(Base2, Req).
+
+generation_config(Req, Opts) ->
+    Cfg = #{maxOutputTokens => max_tokens(Req, Opts)},
+    Cfg1 = maybe_field(Cfg, temperature, temperature, Req),
+    Cfg2 = maybe_field(Cfg1, stopSequences, stop_sequences, Req),
+    maybe_response_schema(Cfg2, Req).
+
+max_tokens(Req, Opts) ->
+    case maps:get(max_tokens, Req, undefined) of
+        undefined -> maps:get(max_tokens, Opts, ?DEFAULT_MAX_TOKENS);
+        N -> N
     end.
+
+maybe_field(Cfg, OutKey, ReqKey, Req) ->
+    case maps:get(ReqKey, Req, undefined) of
+        undefined -> Cfg;
+        V -> Cfg#{OutKey => V}
+    end.
+
+maybe_response_schema(Cfg, Req) ->
+    case maps:get(response_format, Req, undefined) of
+        undefined ->
+            Cfg;
+        Schema ->
+            Cfg#{responseMimeType => ~"application/json", responseSchema => Schema}
+    end.
+
+maybe_tool_config(Body, Req) ->
+    case maps:get(tool_choice, Req, undefined) of
+        undefined -> Body;
+        Choice -> Body#{toolConfig => #{functionCallingConfig => function_calling_config(Choice)}}
+    end.
+
+function_calling_config(auto) -> #{mode => ~"AUTO"};
+function_calling_config(any) -> #{mode => ~"ANY"};
+function_calling_config(none) -> #{mode => ~"NONE"};
+function_calling_config({tool, Name}) -> #{mode => ~"ANY", allowedFunctionNames => [Name]}.
 
 -doc "Translate gakudan/Anthropic-shaped messages into Gemini `contents`.".
 translate_messages(Msgs) ->

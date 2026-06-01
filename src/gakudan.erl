@@ -55,14 +55,52 @@ gakudan:send(RunId, ~"Build a small TCP echo server in Erlang."),
     budget => budget_spec(),
     actor => actor(),
     guardrails => [gakudan_guardrail:ref()],
+    context => gakudan_context:ref(),
+    fork_from => {run_id(), StepId :: binary()},
     initial_messages => [initial_message()]
 }.
 
--doc "Start a new run. Returns the supervisor pid and the run id.".
+-doc """
+Start a new run. Returns the supervisor pid and the run id.
+
+With `fork_from => {SourceRunId, StepId}` the new run is rehydrated from
+the source run's checkpointed state as of that step and continues under a
+fresh run id; the source run is untouched. Forking requires a checkpointer
+(in the config or the `default_checkpointer` env). See
+[ADR 0021](docs/adr/0021-fork-from-checkpoint.md).
+""".
 -spec start_run(run_config()) -> {ok, pid(), run_id()} | {error, term()}.
+start_run(#{fork_from := ForkPoint} = Config0) ->
+    Config = ensure_run_id(maps:remove(fork_from, Config0)),
+    fork_run(ForkPoint, Config);
 start_run(Config0) ->
     Config = ensure_run_id(Config0),
     gakudan_runs_sup:start_run(Config).
+
+fork_run(ForkPoint, Config) ->
+    case resolve_checkpointer(Config) of
+        undefined ->
+            {error, no_checkpointer};
+        {Mod, Opts} ->
+            case gakudan_checkpointer:init(Mod, Opts) of
+                {ok, Handle} ->
+                    NewRunId = maps:get(run_id, Config),
+                    case gakudan_fork:build_snapshot(Handle, ForkPoint, NewRunId) of
+                        {ok, Snapshot} ->
+                            gakudan_runs_sup:resume_run(maps:get(config, Snapshot), Snapshot);
+                        {error, _} = Err ->
+                            Err
+                    end;
+                {error, _} = Err ->
+                    Err
+            end
+    end.
+
+resolve_checkpointer(Config) ->
+    case maps:get(checkpointer, Config, undefined) of
+        undefined -> application:get_env(gakudan, default_checkpointer, undefined);
+        Spec -> Spec
+    end.
 
 -doc "Send a user message into the run's blackboard, kicking off (or continuing) the loop.".
 -spec send(run_id(), binary()) -> ok | {error, not_found}.

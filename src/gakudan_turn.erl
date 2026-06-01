@@ -2,10 +2,15 @@
 -moduledoc false.
 
 -export([run/10, run/11]).
+-export([run_tools/4]).
 
 -define(MAX_TOOL_ITERATIONS, 10).
 
--type audit_ctx() :: #{audit => gakudan_audit:handle(), actor => map()}.
+-type audit_ctx() :: #{
+    audit => gakudan_audit:handle(),
+    actor => map(),
+    context => undefined | gakudan_context:ref()
+}.
 -type usage() :: #{
     tokens_in := non_neg_integer(),
     tokens_out := non_neg_integer(),
@@ -72,8 +77,16 @@ run(
     ResolvedTools = gakudan_tool:resolve(AgentMod:tools()),
     Specs = [maps:get(spec, R) || R <- ResolvedTools],
     Model = AgentMod:model(),
+    RequestOptions = gakudan_agent:request_options(AgentMod),
     Transcript = gakudan_blackboard:entries(Blackboard),
-    Messages = transcript_to_messages(Transcript, AgentId),
+    ContextRef = maps:get(context, AuditCtx, undefined),
+    Compacted = gakudan_context:apply(ContextRef, Transcript, #{
+        run_id => RunId,
+        agent_id => AgentId,
+        turn => Turn,
+        model => Model
+    }),
+    Messages = transcript_to_messages(Compacted, AgentId),
     Ctx = #{
         run_id => RunId,
         agent_id => AgentId,
@@ -82,6 +95,7 @@ run(
         tools => Specs,
         resolved_tools => ResolvedTools,
         model => Model,
+        request_options => RequestOptions,
         turn => Turn,
         checkpointer => Checkpointer,
         llm_mod => LlmMod,
@@ -106,6 +120,7 @@ loop(Ctx, Msgs, N, Usage) ->
         tools := Tools,
         resolved_tools := ResolvedTools,
         model := Model,
+        request_options := RequestOptions,
         bb := BB
     } = Ctx,
     case guard(Ctx, input, Msgs) of
@@ -113,8 +128,13 @@ loop(Ctx, Msgs, N, Usage) ->
             append_block(Ctx, input, Block),
             {ok, Usage};
         {ok, GuardedMsgs} ->
-            Req = #{model => Model, system => Sys, tools => Tools, messages => GuardedMsgs},
+            Base = #{model => Model, system => Sys, tools => Tools, messages => GuardedMsgs},
+            Req = maps:merge(Base, maps:remove(validator, RequestOptions)),
+            StructuredSchema = maps:get(response_format, RequestOptions, undefined),
             case complete_with_idempotency(Ctx, N, Req) of
+                {ok, #{content := Content} = Resp} when StructuredSchema =/= undefined ->
+                    Usage1 = add_usage(Usage, Resp),
+                    handle_structured(Ctx, Content, Usage1);
                 {ok, #{stop_reason := tool_use, content := Content} = Resp} ->
                     Usage1 = add_usage(Usage, Resp),
                     ToolUses = [B || #{type := tool_use} = B <- Content],
@@ -136,6 +156,42 @@ loop(Ctx, Msgs, N, Usage) ->
                     {cancelled, Usage};
                 {error, Reason} ->
                     error({llm_error, Reason})
+            end
+    end.
+
+handle_structured(Ctx, Content, Usage) ->
+    #{agent_id := AgentId, request_options := RequestOptions, bb := BB} = Ctx,
+    Validator = maps:get(validator, RequestOptions, undefined),
+    case gakudan_structured:extract(Content) of
+        {error, no_structured_output} ->
+            Text = collect_text(Content),
+            {ok, _} = gakudan_blackboard:append(BB, {agent, AgentId}, Text),
+            {ok, Usage};
+        {ok, Value} ->
+            case gakudan_structured:validate(Validator, Value) of
+                {ok, Validated} ->
+                    ok = gakudan_blackboard:put(
+                        BB, structured_output, #{agent_id => AgentId, value => Validated}
+                    ),
+                    Body = iolist_to_binary(json:encode(Validated)),
+                    {ok, _} = gakudan_blackboard:append(BB, {agent, AgentId}, Body),
+                    {ok, Usage};
+                {error, Errors} ->
+                    telemetry:execute(
+                        [gakudan, validation, failed],
+                        #{errors => length(Errors)},
+                        #{
+                            run_id => maps:get(run_id, Ctx),
+                            agent_id => AgentId,
+                            turn => maps:get(turn, Ctx)
+                        }
+                    ),
+                    FailBody = iolist_to_binary([
+                        ~"structured output failed validation: ",
+                        io_lib:format("~p", [Errors])
+                    ]),
+                    {ok, _} = gakudan_blackboard:append(BB, system, FailBody),
+                    {ok, Usage}
             end
     end.
 
@@ -402,25 +458,69 @@ collect_text(Content) ->
     Texts = [T || #{type := text, text := T} <- Content],
     iolist_to_binary(lists:join(~"\n", Texts)).
 
+%% Execute the turn's tool_use blocks. A single call runs inline; two or
+%% more run concurrently on monitored workers and are gathered back in the
+%% original block order, so result ordering is independent of completion
+%% order. Each worker is monitored, so a crashing tool surfaces as an error
+%% block rather than taking down the turn. See ADR 0020.
 run_tools(Ctx, Iter, ResolvedTools, ToolUses) ->
     NameMap = maps:from_list([
         {maps:get(name, maps:get(spec, R)), R}
      || R <- ResolvedTools
     ]),
-    [
-        case maps:find(Name, NameMap) of
-            {ok, Resolved} ->
-                tool_result_block(Id, run_one_tool(Ctx, Iter, Id, Name, Resolved, Input));
-            error ->
-                #{
-                    type => tool_result,
-                    tool_use_id => Id,
-                    is_error => true,
-                    content => <<"unknown tool: ", Name/binary>>
-                }
+    case ToolUses of
+        [] -> [];
+        [Single] -> [run_tool_block(Ctx, Iter, NameMap, Single)];
+        _ -> run_tools_parallel(Ctx, Iter, NameMap, ToolUses)
+    end.
+
+run_tools_parallel(Ctx, Iter, NameMap, ToolUses) ->
+    Parent = self(),
+    Indexed = lists:enumerate(ToolUses),
+    Workers = maps:from_list([
+        begin
+            {Pid, MonRef} = spawn_monitor(fun() ->
+                Block = run_tool_block(Ctx, Iter, NameMap, ToolUse),
+                Parent ! {tool_done, self(), Block}
+            end),
+            {Pid, #{index => I, mon_ref => MonRef, tool_use => ToolUse}}
         end
-     || #{id := Id, name := Name, input := Input} <- ToolUses
-    ].
+     || {I, ToolUse} <- Indexed
+    ]),
+    Gathered = gather_tool_workers(Workers, #{}),
+    [maps:get(I, Gathered) || {I, _} <- Indexed].
+
+gather_tool_workers(Workers, Acc) when map_size(Workers) =:= 0 ->
+    Acc;
+gather_tool_workers(Workers, Acc) ->
+    receive
+        {tool_done, Pid, Block} when is_map_key(Pid, Workers) ->
+            #{index := I, mon_ref := MonRef} = maps:get(Pid, Workers),
+            _ = erlang:demonitor(MonRef, [flush]),
+            gather_tool_workers(maps:remove(Pid, Workers), Acc#{I => Block});
+        {'DOWN', _MonRef, process, Pid, Reason} when is_map_key(Pid, Workers) ->
+            #{index := I, tool_use := #{id := Id}} = maps:get(Pid, Workers),
+            Block = #{
+                type => tool_result,
+                tool_use_id => Id,
+                is_error => true,
+                content => iolist_to_binary(io_lib:format("tool worker crashed: ~p", [Reason]))
+            },
+            gather_tool_workers(maps:remove(Pid, Workers), Acc#{I => Block})
+    end.
+
+run_tool_block(Ctx, Iter, NameMap, #{id := Id, name := Name, input := Input}) ->
+    case maps:find(Name, NameMap) of
+        {ok, Resolved} ->
+            tool_result_block(Id, run_one_tool(Ctx, Iter, Id, Name, Resolved, Input));
+        error ->
+            #{
+                type => tool_result,
+                tool_use_id => Id,
+                is_error => true,
+                content => <<"unknown tool: ", Name/binary>>
+            }
+    end.
 
 %% Run a single tool, caching its result under a deterministic key so a
 %% resumed turn replays the result instead of re-running the tool (ADR

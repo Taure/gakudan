@@ -73,10 +73,12 @@ Swap in `planner_coder:run_stub()` for a two-agent handoff with a tool call.
 | --- | --- | --- | --- |
 | Run | (private) | one supervision tree per run | A single collaboration session, crash-isolated. |
 | Agent | `gakudan_agent` | bring your own | A role: system prompt, model, tools, id. |
-| Router | `gakudan_router` | `round_robin`, `handoff`, `manager` | Decides whose turn is next. |
+| Router | `gakudan_router` | `round_robin`, `handoff`, `manager`, `loop`, `auto` | Decides whose turn is next. |
 | Blackboard | (private) | gen_server + ETS | Append-only transcript with subscriber pub/sub. |
-| Tool | `gakudan_tool` | bring your own | JSON schema + `run/1` callback. |
-| LLM backend | `gakudan_llm` | `anthropic`, `gemini`, `vertex`, `stub` | One callback: `complete(req, opts) -> response`. |
+| Tool | `gakudan_tool` | bring your own | JSON schema + `run/1` callback. Tool calls in a turn run in parallel. |
+| LLM backend | `gakudan_llm` | `anthropic`, `gemini`, `vertex`, `stub`, `fallback`, `retry` | One callback: `complete(req, opts) -> response`. |
+| Validator | `gakudan_validator` | `json` | Validates structured (`response_format`) output against a schema. |
+| Context transform | `gakudan_context` | `trim` | Compacts the transcript before each LLM call. |
 | Guardrail | `gakudan_guardrail` | bring your own | Allow / block / transform at the LLM boundary. |
 | Audit sink | `gakudan_audit` | `kura` | Durable, synchronous record of lifecycle + policy events. |
 | MCP client | `gakudan_mcp_client` | - | Speaks MCP Streamable HTTP; one gen_server per endpoint; exposes discovered tools for use in agents. |
@@ -133,6 +135,78 @@ audit) without any code change:
 ```erlang
 llm => {gakudan_llm_anthropic, #{base_url => ~"https://sekisho.internal/anthropic"}}
 ```
+
+## Generation options and structured output
+
+An agent can set per-request generation options via the optional
+`request_options/0` callback; backends map them to provider-native fields:
+
+```erlang
+request_options() ->
+    #{
+        temperature    => 0.2,
+        max_tokens     => 1024,
+        stop_sequences => [~"\n\n"],
+        tool_choice    => any,           %% auto | any | none | {tool, Name}
+        response_format => #{            %% a JSON schema -> schema-constrained output
+            type => ~"object",
+            properties => #{score => #{type => ~"integer"}},
+            required => [~"score"]
+        },
+        validator => {gakudan_validator_json, Schema}   %% optional, validates the result
+    }.
+```
+
+When `response_format` is set, the parsed object is validated (if a
+`validator` is given), written to the blackboard under the
+`structured_output` key, and appended to the transcript as JSON. Bring your
+own `gakudan_validator` module to validate against anything; the JSON-schema
+default covers `type`/`required`/`properties`/`items`/`enum`. See
+[ADR 0016](docs/adr/0016-llm-request-options.md) and
+[ADR 0017](docs/adr/0017-structured-output-validation.md).
+
+## Resilience: fallback and retry
+
+Resilience is composable LLM backends - no core changes. Wrap your backend
+spec to fall through to alternatives, retry transient errors, or both:
+
+```erlang
+llm => {gakudan_llm_fallback, #{
+    backends => [
+        {gakudan_llm_retry, #{backend => {gakudan_llm_anthropic, #{}}, max_attempts => 3}},
+        {gakudan_llm_vertex, #{project => P, location => L, token_fun => F}}
+    ]
+}}
+```
+
+`retry` backs off exponentially on 5xx / timeout / connection errors only;
+`fallback` tries each backend in order and never falls through a user
+cancel. See [ADR 0018](docs/adr/0018-resilient-llm-backends.md).
+
+## Context compaction
+
+By default the full transcript is replayed every turn. Set a `context`
+transform to compact it just before each LLM call:
+
+```erlang
+context => {gakudan_context_trim, #{max_tokens => 8000, keep_first => 1}}
+```
+
+The default trims oldest entries to fit a token budget (pinning the first N);
+implement `gakudan_context` to summarise or retrieve instead. See
+[ADR 0019](docs/adr/0019-context-compaction.md).
+
+## Fork from a checkpoint
+
+With a checkpointer configured, branch a new run from any persisted step of
+an existing run - the source run is untouched:
+
+```erlang
+{ok, _Sup, NewRunId} = gakudan:start_run(Config#{fork_from => {SourceRunId, StepId}}).
+```
+
+The new run rehydrates the source transcript as of that step and continues
+under a fresh id. See [ADR 0021](docs/adr/0021-fork-from-checkpoint.md).
 
 ## Examples
 

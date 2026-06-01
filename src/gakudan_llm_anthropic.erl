@@ -33,6 +33,7 @@ to the standard `input_tokens` and `output_tokens`).
 
 -export([complete/2, stream_call/3]).
 -export([build_body/2, parse_response/1, system_with_cache/1, tools_with_cache/1]).
+-export([structured_output_tool_name/0]).
 -export([api_url/1]).
 -export([parse_sse/2, apply_anthropic_event/2]).
 -export([fresh_stream_acc/0, feed_stream_chunk/4, finalise/1]).
@@ -43,6 +44,7 @@ to the standard `input_tokens` and `output_tokens`).
 -define(VERSION, "2023-06-01").
 -define(DEFAULT_MAX_TOKENS, 4096).
 -define(DEFAULT_TIMEOUT, 60_000).
+-define(STRUCTURED_OUTPUT_TOOL, ~"structured_output").
 
 complete(Req, Opts) ->
     case api_key(Opts) of
@@ -68,17 +70,84 @@ do_complete(ApiKey, Req, Opts) ->
             {error, Reason}
     end.
 
--doc "Build the JSON-encodable Anthropic request body from a gakudan request.".
-build_body(#{model := Model, system := Sys, tools := Tools, messages := Msgs}, Opts) ->
+-doc """
+Build the JSON-encodable Anthropic request body from a gakudan request.
+
+Optional `t:gakudan_llm:request/0` fields (`max_tokens`, `temperature`,
+`stop_sequences`, `tool_choice`, `response_format`) are mapped to their
+native Anthropic equivalents. A `max_tokens` in the request takes
+precedence over one in `Opts`; absent both, the backend default applies.
+""".
+build_body(#{model := Model, system := Sys, tools := Tools, messages := Msgs} = Req, Opts) ->
     Base = #{
         model => Model,
         system => system_with_cache(Sys),
         messages => normalise_messages(Msgs),
-        max_tokens => maps:get(max_tokens, Opts, ?DEFAULT_MAX_TOKENS)
+        max_tokens => max_tokens(Req, Opts)
     },
-    case Tools of
-        [] -> Base;
-        _ -> Base#{tools => tools_with_cache(Tools)}
+    Base1 =
+        case Tools of
+            [] -> Base;
+            _ -> Base#{tools => tools_with_cache(Tools)}
+        end,
+    apply_request_options(Base1, Req).
+
+max_tokens(Req, Opts) ->
+    case maps:get(max_tokens, Req, undefined) of
+        undefined -> maps:get(max_tokens, Opts, ?DEFAULT_MAX_TOKENS);
+        N -> N
+    end.
+
+apply_request_options(Body, Req) ->
+    Body1 = maybe_field(Body, temperature, temperature, Req),
+    Body2 = maybe_field(Body1, stop_sequences, stop_sequences, Req),
+    Body3 = maybe_tool_choice(Body2, Req),
+    maybe_response_format(Body3, Req).
+
+maybe_field(Body, OutKey, ReqKey, Req) ->
+    case maps:get(ReqKey, Req, undefined) of
+        undefined -> Body;
+        V -> Body#{OutKey => V}
+    end.
+
+maybe_tool_choice(Body, Req) ->
+    case maps:get(tool_choice, Req, undefined) of
+        undefined -> Body;
+        Choice -> Body#{tool_choice => tool_choice(Choice)}
+    end.
+
+-doc """
+The synthetic tool name used to coerce structured output when a request
+carries a `response_format` schema. The parsed object surfaces as the
+input of a `tool_use` block with this name.
+""".
+-spec structured_output_tool_name() -> binary().
+structured_output_tool_name() ->
+    ?STRUCTURED_OUTPUT_TOOL.
+
+tool_choice(auto) -> #{type => ~"auto"};
+tool_choice(any) -> #{type => ~"any"};
+tool_choice(none) -> #{type => ~"none"};
+tool_choice({tool, Name}) -> #{type => ~"tool", name => Name}.
+
+%% Anthropic has no first-class JSON-schema response_format, so request a
+%% structured object via a single synthetic tool the model must call. The
+%% tool's input_schema is the requested schema; tool_choice forces its use.
+maybe_response_format(Body, Req) ->
+    case maps:get(response_format, Req, undefined) of
+        undefined ->
+            Body;
+        Schema ->
+            Tool = #{
+                name => ?STRUCTURED_OUTPUT_TOOL,
+                description => ~"Return the final answer as a structured object.",
+                input_schema => Schema
+            },
+            ExistingTools = maps:get(tools, Body, []),
+            Body#{
+                tools => ExistingTools ++ [Tool],
+                tool_choice => #{type => ~"tool", name => ?STRUCTURED_OUTPUT_TOOL}
+            }
     end.
 
 -doc """

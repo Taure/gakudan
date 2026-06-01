@@ -54,6 +54,7 @@ Two collections live in this contract:
     statem_state := atom(),
     turn := non_neg_integer(),
     fanout => undefined | #{base := non_neg_integer(), agents := [atom()]},
+    forked_from => #{run_id := gakudan:run_id(), step_id := binary()},
     updated_at := integer()
 }.
 
