@@ -375,11 +375,18 @@ next_tool_id(#{tool_seq := N} = Acc) ->
     Id = iolist_to_binary([~"gem_tu_", integer_to_binary(N + 1)]),
     {Id, Acc#{tool_seq => N + 1}}.
 
+%% Map known Gemini finishReason values to atoms via an explicit whitelist.
+%% An untrusted upstream (a gateway behind base_url) could otherwise feed novel
+%% values into binary_to_atom and exhaust the atom table, so anything outside
+%% the known set collapses to the single fixed atom `unknown`.
 normalise_finish_reason(~"STOP") -> end_turn;
 normalise_finish_reason(~"MAX_TOKENS") -> max_tokens;
 normalise_finish_reason(~"TOOL_CALL") -> tool_use;
+normalise_finish_reason(~"SAFETY") -> safety;
+normalise_finish_reason(~"RECITATION") -> recitation;
+normalise_finish_reason(~"OTHER") -> unknown;
 normalise_finish_reason(~"FINISH_REASON_UNSPECIFIED") -> end_turn;
-normalise_finish_reason(Other) when is_binary(Other) -> binary_to_atom(Other).
+normalise_finish_reason(Other) when is_binary(Other) -> unknown.
 
 -doc "Apply a decoded Gemini SSE chunk to the streaming accumulator. Pure - no subscriber side effects.".
 -spec apply_gemini_event(map(), stream_acc()) -> stream_acc().

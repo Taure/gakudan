@@ -115,7 +115,7 @@ parse_response(Body) ->
     Stop = maps:get(~"stop_reason", Decoded, ~"end_turn"),
     Blocks = [parse_block(B) || B <- Content],
     Base = #{
-        stop_reason => binary_to_atom(Stop),
+        stop_reason => stop_reason_to_atom(Stop),
         content => Blocks
     },
     case maps:get(~"usage", Decoded, undefined) of
@@ -136,6 +136,18 @@ maybe_put(Map, OutKey, JsonKey, Source) ->
         undefined -> Map;
         V -> Map#{OutKey => V}
     end.
+
+%% Map known Anthropic stop_reason values to atoms via an explicit whitelist.
+%% Untrusted upstreams (a gateway behind base_url) could otherwise feed novel
+%% values into binary_to_atom and exhaust the atom table, so anything outside
+%% the known set collapses to the single fixed atom `unknown`.
+stop_reason_to_atom(~"end_turn") -> end_turn;
+stop_reason_to_atom(~"max_tokens") -> max_tokens;
+stop_reason_to_atom(~"stop_sequence") -> stop_sequence;
+stop_reason_to_atom(~"tool_use") -> tool_use;
+stop_reason_to_atom(~"pause_turn") -> pause_turn;
+stop_reason_to_atom(~"refusal") -> refusal;
+stop_reason_to_atom(_Other) -> unknown.
 
 parse_block(#{~"type" := ~"text", ~"text" := T}) ->
     #{type => text, text => T};
@@ -320,7 +332,7 @@ apply_anthropic_event(#{~"type" := ~"message_delta"} = E, Acc) ->
     Acc1 =
         case maps:get(~"delta", E, #{}) of
             #{~"stop_reason" := SR} when is_binary(SR) ->
-                Acc#{stop_reason => binary_to_atom(SR)};
+                Acc#{stop_reason => stop_reason_to_atom(SR)};
             _ ->
                 Acc
         end,
@@ -370,7 +382,7 @@ forward(Sub, Ref, #{~"type" := ~"message_delta"} = E, _NewAcc) ->
             _ =
                 Sub !
                     {gakudan_llm_stream, Ref,
-                        {message_delta, #{stop_reason => binary_to_atom(SR)}}},
+                        {message_delta, #{stop_reason => stop_reason_to_atom(SR)}}},
             ok;
         _ ->
             ok
