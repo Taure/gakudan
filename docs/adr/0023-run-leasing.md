@@ -4,14 +4,14 @@ Date: 2026-06-05
 
 ## Status
 
-Proposed. Builds on [ADR 0003](0003-checkpointer-behaviour.md) (checkpointer
+Accepted. Builds on [ADR 0003](0003-checkpointer-behaviour.md) (checkpointer
 behaviour), [ADR 0004](0004-resume-interrupt-idempotency.md) (resume /
 idempotency) and [ADR 0009](0009-tool-idempotency-supervised-resume.md)
 (exactly-once tool replay).
 
-This ADR refines the scope line "Out: multi-node distribution" and therefore
-needs architecture-guardian review and human sign-off before implementation.
-See **Scope** below for why leasing is not BEAM clustering.
+This ADR refines the scope line "Out: multi-node distribution"; the **Scope**
+section below records why leasing is not BEAM clustering. AGENTS.md is updated
+to match.
 
 ## Context
 

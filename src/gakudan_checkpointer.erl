@@ -28,12 +28,19 @@ Two collections live in this contract:
     save_step/2,
     load_step/3,
     save_tool_result/2,
-    load_tool_result/3
+    load_tool_result/3,
+    claim_runs/3,
+    renew_leases/4,
+    release_run/3
 ]).
 
--export_type([state/0, run_snapshot/0, step_record/0, tool_result_record/0, run_status/0]).
+-export_type([
+    state/0, run_snapshot/0, step_record/0, tool_result_record/0, run_status/0, owner_id/0
+]).
 
 -type state() :: term().
+
+-type owner_id() :: binary().
 
 -type run_status() ::
     pending
@@ -55,6 +62,8 @@ Two collections live in this contract:
     turn := non_neg_integer(),
     fanout => undefined | #{base := non_neg_integer(), agents := [atom()]},
     forked_from => #{run_id := gakudan:run_id(), step_id := binary()},
+    owner => owner_id(),
+    lease_ttl_ms => pos_integer(),
     updated_at := integer()
 }.
 
@@ -79,8 +88,12 @@ Two collections live in this contract:
     inserted_at := integer()
 }.
 
+-type claim_opts() :: #{lease_ttl_ms := pos_integer(), limit := pos_integer()}.
+
+-export_type([claim_opts/0]).
+
 -callback init(Opts :: map()) -> {ok, state()} | {error, term()}.
--callback save_snapshot(state(), run_snapshot()) -> ok | {error, term()}.
+-callback save_snapshot(state(), run_snapshot()) -> ok | {error, lease_lost | term()}.
 -callback load_snapshot(state(), gakudan:run_id()) ->
     {ok, run_snapshot()} | {error, not_found | term()}.
 -callback list_active(state()) -> {ok, [gakudan:run_id()]} | {error, term()}.
@@ -91,6 +104,17 @@ Two collections live in this contract:
 -callback save_tool_result(state(), tool_result_record()) -> ok | {error, term()}.
 -callback load_tool_result(state(), gakudan:run_id(), ToolStepId :: binary()) ->
     {ok, tool_result_record()} | {error, not_found}.
+
+%% Optional, for horizontal scale-out (ADR 0023). A backend that does not
+%% implement these supports single-node operation only; the lease wrappers
+%% below return `{error, not_supported}`.
+-callback claim_runs(state(), owner_id(), claim_opts()) ->
+    {ok, [run_snapshot()]} | {error, term()}.
+-callback renew_leases(state(), owner_id(), [gakudan:run_id()], LeaseTtlMs :: pos_integer()) ->
+    {ok, Held :: [gakudan:run_id()]} | {error, term()}.
+-callback release_run(state(), owner_id(), gakudan:run_id()) -> ok | {error, term()}.
+
+-optional_callbacks([claim_runs/3, renew_leases/4, release_run/3]).
 
 -doc "Initialise a checkpointer impl. Returns its opaque state handle.".
 -spec init(module(), map()) -> {ok, {module(), state()}} | {error, term()}.
@@ -196,6 +220,47 @@ load_tool_result({Mod, State}, RunId, ToolStepId) ->
             {Result, #{}, load_stop_meta(StartMeta, Result)}
         end
     ).
+
+-doc """
+Atomically claim active runs that are unowned or whose lease has expired,
+marking them owned by `OwnerId`, and return their snapshots. The basis for
+horizontal scale-out (ADR 0023). Returns `{error, not_supported}` if the
+backend does not implement leasing.
+""".
+-spec claim_runs({module(), state()}, owner_id(), claim_opts()) ->
+    {ok, [run_snapshot()]} | {error, not_supported | term()}.
+claim_runs({Mod, State}, OwnerId, Opts) ->
+    case erlang:function_exported(Mod, claim_runs, 3) of
+        true -> Mod:claim_runs(State, OwnerId, Opts);
+        false -> {error, not_supported}
+    end.
+
+-doc """
+Extend the lease on the runs `OwnerId` still owns, returning the subset it
+actually still holds. Runs absent from the returned list have been lost to
+another owner and must be fenced. Returns `{error, not_supported}` if the
+backend does not implement leasing.
+""".
+-spec renew_leases({module(), state()}, owner_id(), [gakudan:run_id()], pos_integer()) ->
+    {ok, [gakudan:run_id()]} | {error, not_supported | term()}.
+renew_leases({Mod, State}, OwnerId, RunIds, LeaseTtlMs) ->
+    case erlang:function_exported(Mod, renew_leases, 4) of
+        true -> Mod:renew_leases(State, OwnerId, RunIds, LeaseTtlMs);
+        false -> {error, not_supported}
+    end.
+
+-doc """
+Release ownership of a run so another node can claim it immediately, used on
+graceful shutdown. Returns `{error, not_supported}` if the backend does not
+implement leasing.
+""".
+-spec release_run({module(), state()}, owner_id(), gakudan:run_id()) ->
+    ok | {error, not_supported | term()}.
+release_run({Mod, State}, OwnerId, RunId) ->
+    case erlang:function_exported(Mod, release_run, 3) of
+        true -> Mod:release_run(State, OwnerId, RunId);
+        false -> {error, not_supported}
+    end.
 
 stop_meta(StartMeta, ok) -> StartMeta#{outcome => ok};
 stop_meta(StartMeta, {error, Reason}) -> StartMeta#{outcome => error, reason => Reason}.
