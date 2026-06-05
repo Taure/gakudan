@@ -41,3 +41,4 @@ with a new one.
 | [0020](0020-parallel-tool-calls.md) | Parallel tool calls within a turn |
 | [0021](0021-fork-from-checkpoint.md) | Fork from checkpoint |
 | [0022](0022-loop-and-auto-routers.md) | Loop and auto (LLM-select) routers |
+| [0023](0023-run-leasing.md) | Run leasing for horizontal scale-out |
