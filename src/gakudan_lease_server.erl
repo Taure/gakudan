@@ -118,13 +118,17 @@ do_renew(#{owner := OwnerId}) ->
 
 %% Tell the run to fence itself; the statem stops the whole run and emits the
 %% lost telemetry. Signalling beats stopping it from here, so all teardown
-%% goes through one path in the statem.
+%% goes through one path in the statem. Best-effort: a lost signal (stale pid
+%% mid-restart) is recovered when the next renew cycle re-detects the lease.
 fence(RunId) ->
     case gakudan_registry:lookup(RunId) of
         {ok, #{run_statem := Pid}} -> Pid ! gakudan_lease_lost;
         {error, not_found} -> ok
     end.
 
+%% Leasing coordinates through the global `default_checkpointer`. A run that
+%% overrides it with a per-run `checkpointer` is not claimed or renewed here,
+%% so leasing assumes runs use the global checkpointer. See ADR 0023.
 with_handle(Fun) ->
     case application:get_env(gakudan, default_checkpointer, undefined) of
         undefined ->

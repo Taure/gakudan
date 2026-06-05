@@ -12,7 +12,8 @@
     tool_result_round_trip/1,
     tool_not_re_executed_on_replay/1,
     supervised_restart_restores_run/1,
-    auto_continues_running_fanout_on_resume/1
+    auto_continues_running_fanout_on_resume/1,
+    lease_lost_fences_without_failing_snapshot/1
 ]).
 
 all() ->
@@ -26,7 +27,8 @@ all() ->
         tool_result_round_trip,
         tool_not_re_executed_on_replay,
         supervised_restart_restores_run,
-        auto_continues_running_fanout_on_resume
+        auto_continues_running_fanout_on_resume,
+        lease_lost_fences_without_failing_snapshot
     ].
 
 init_per_suite(Config) ->
@@ -279,6 +281,63 @@ auto_continues_running_fanout_on_resume(_Config) ->
     true = lists:member(~"resumed-output", AgentAOutputs),
     ok = gakudan:stop(RunId),
     gen_server:stop(Script).
+
+%% The fence guarantee of ADR 0023: when a snapshot write is refused with
+%% `lease_lost`, the run stops locally and must NOT write a failed/completed
+%% snapshot on teardown (the new owner holds the run).
+lease_lost_fences_without_failing_snapshot(_Config) ->
+    HandlerId = {?MODULE, lease_lost},
+    Self = self(),
+    telemetry:attach(
+        HandlerId,
+        [gakudan, lease, lost],
+        fun(_E, _M, Meta, _) -> Self ! {lease_lost_event, Meta} end,
+        undefined
+    ),
+    try
+        {ok, Script} = gakudan_llm_stub_script:start_link([{text, ~"x"}]),
+        {ok, _Sup, RunId} = gakudan:start_run(#{
+            agents => [agent_a_mod],
+            router => {gakudan_router_round_robin, #{}},
+            llm => {gakudan_llm_stub, #{script_owner => Script}},
+            checkpointer => {gakudan_checkpointer_fence_stub, #{report => Self}},
+            max_turns => 4
+        }),
+        %% The first save (entering idle) is refused, fencing the run.
+        receive
+            {lease_lost_event, Meta} -> RunId = maps:get(run_id, Meta)
+        after 5000 -> ct:fail(no_lease_lost_telemetry)
+        end,
+        ok = wait_until_gone(RunId, 5000),
+        %% Only the initial idle write was attempted; teardown wrote nothing.
+        [idle] = drain_fence_saves([])
+    after
+        telemetry:detach(HandlerId)
+    end.
+
+drain_fence_saves(Acc) ->
+    receive
+        {fence_save, Status} -> drain_fence_saves([Status | Acc])
+    after 200 -> lists:reverse(Acc)
+    end.
+
+wait_until_gone(RunId, Timeout) ->
+    Deadline = erlang:monotonic_time(millisecond) + Timeout,
+    wait_until_gone_loop(RunId, Deadline).
+
+wait_until_gone_loop(RunId, Deadline) ->
+    case gakudan_registry:lookup(RunId) of
+        {error, not_found} ->
+            ok;
+        {ok, _} ->
+            case erlang:monotonic_time(millisecond) > Deadline of
+                true ->
+                    ct:fail(run_not_torn_down);
+                false ->
+                    timer:sleep(50),
+                    wait_until_gone_loop(RunId, Deadline)
+            end
+    end.
 
 start_run(Script, MaxTurns) ->
     gakudan:start_run(#{

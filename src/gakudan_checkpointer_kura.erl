@@ -92,7 +92,10 @@ save_snapshot_plain(Repo, Snapshot) ->
 
 %% Lease-aware write. Locks the run row FOR UPDATE; an existing row owned by
 %% another node fails the ownership check and the write is refused with
-%% `lease_lost`. A successful write also renews the lease. See ADR 0023.
+%% `lease_lost`. A successful write also renews the lease. The expiry is
+%% second-resolution (utc_datetime) and derived from the writer's clock, so
+%% across nodes the fence margin absorbs clock skew; keep TTL well above the
+%% renew interval. See ADR 0023.
 save_snapshot_owned(Repo, Snapshot, Owner) ->
     #{run_id := RunId, updated_at := UpdatedAt} = Snapshot,
     Ttl = maps:get(lease_ttl_ms, Snapshot, 30000),

@@ -379,7 +379,7 @@ Postgres-class backend - it relies on `FOR UPDATE SKIP LOCKED`):
     {default_checkpointer, {gakudan_checkpointer_kura, #{repo => my_repo}}},
     {lease, #{
         enabled => true,
-        owner_id => <<"node-a">>,        % default: node() + a per-boot token
+        owner_id => ~"node-a",        % default: node() + a per-boot token
         ttl_ms => 30000,
         renew_interval_ms => 10000,
         claim_interval_ms => 15000,

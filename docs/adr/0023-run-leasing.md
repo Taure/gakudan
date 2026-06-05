@@ -113,7 +113,7 @@ today.
 ```erlang
 {lease, #{
     enabled => true,
-    owner_id => <<"node-a">>,        % default: node() + boot token
+    owner_id => ~"node-a",        % default: node() + boot token
     ttl_ms => 30000,
     renew_interval_ms => 10000,
     claim_interval_ms => 15000,

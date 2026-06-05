@@ -29,7 +29,8 @@ it is safe to run without Docker. Connection is overridable via
     lease_expiry_reclaim/1,
     lease_fenced_write/1,
     lease_renew_holds/1,
-    lease_release_frees/1
+    lease_release_frees/1,
+    lease_owned_insert/1
 ]).
 
 -define(REPO, gakudan_test_repo).
@@ -50,7 +51,8 @@ all() ->
         lease_expiry_reclaim,
         lease_fenced_write,
         lease_renew_holds,
-        lease_release_frees
+        lease_release_frees,
+        lease_owned_insert
     ].
 
 %%----------------------------------------------------------------------
@@ -303,6 +305,19 @@ lease_release_frees(_Config) ->
         lease_ttl_ms => 60000, limit => 10
     }),
     ?assertEqual([RunId], [maps:get(run_id, S) || S <- Claimed]).
+
+lease_owned_insert(_Config) ->
+    H = checkpointer(),
+    RunId = ~"L6",
+    %% A run started under leasing: its first save is an owner-tagged insert
+    %% (no prior row), which must land with the owner set.
+    ok = gakudan_checkpointer:save_snapshot(H, owned_snapshot(RunId, running, ~"node-a", 60000)),
+    {ok, Loaded} = gakudan_checkpointer:load_snapshot(H, RunId),
+    ?assertEqual(running, maps:get(status, Loaded)),
+    ?assertEqual(
+        {ok, []},
+        gakudan_checkpointer:claim_runs(H, ~"node-b", #{lease_ttl_ms => 60000, limit => 10})
+    ).
 
 %%----------------------------------------------------------------------
 %% Helpers
