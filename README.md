@@ -358,6 +358,40 @@ to the loop. See [ADR 0004](docs/adr/0004-resume-interrupt-idempotency.md).
 `initial_messages` on `start_run/1` lets callers inject RAG output / doc
 grounding into the blackboard before the first turn fires.
 
+## Horizontal scale-out (run leasing)
+
+Because runs are recoverable state in a shared database, several gakudan
+nodes can share one Postgres for horizontal scale-out and high
+availability - no BEAM clustering. Each run is owned by at most one node
+via a lease that is renewed by a heartbeat and reclaimed on expiry, so a
+dead node's runs are picked up by another within one lease TTL. A node
+that loses its lease fences itself: ownership-conditional writes are
+refused with `{error, lease_lost}`, which composes with idempotent tool
+replay to keep side effects exactly-once. See
+[ADR 0023](docs/adr/0023-run-leasing.md).
+
+Leasing is off by default. Turn it on with a `lease` map (requires a
+Postgres-class backend - it relies on `FOR UPDATE SKIP LOCKED`):
+
+```erlang
+%% sys.config
+{gakudan, [
+    {default_checkpointer, {gakudan_checkpointer_kura, #{repo => my_repo}}},
+    {lease, #{
+        enabled => true,
+        owner_id => ~"node-a",        % default: node() + a per-boot token
+        ttl_ms => 30000,
+        renew_interval_ms => 10000,
+        claim_interval_ms => 15000,
+        claim_batch => 50
+    }}
+]}.
+```
+
+Run new agents on whichever node a load balancer picks; orphaned runs
+migrate on their own. Configure a stable `owner_id` per node in
+production.
+
 ## Streaming
 
 Subscribe to a run to receive token-by-token deltas as they arrive from

@@ -281,13 +281,39 @@ handle_event(internal, dispatch_after_resume, awaiting_human, Data) ->
     dispatch_next_turn(Data);
 handle_event(internal, {redispatch_fanout, Agents}, idle, Data) ->
     start_fanout(Agents, Data);
+handle_event(info, gakudan_lease_lost, _State, #data{stopped = undefined} = Data) ->
+    %% This node's lease was lost to another owner (its save was fenced, or the
+    %% heartbeat reported the lease gone). Stop the whole run without writing -
+    %% the new owner is running it now. Tear down via the runs supervisor,
+    %% asynchronously so we are not blocked terminating our own supervisor.
+    telemetry:execute(
+        [gakudan, lease, lost],
+        #{count => 1},
+        #{run_id => Data#data.run_id}
+    ),
+    RunSup = Data#data.run_sup,
+    RunId = Data#data.run_id,
+    _ = spawn(fun() ->
+        case gakudan_runs_sup:stop_run(RunSup) of
+            ok ->
+                ok;
+            {error, Why} ->
+                ?LOG_WARNING(#{msg => "lease-lost teardown failed", run_id => RunId, reason => Why})
+        end
+    end),
+    {keep_state, Data#data{stopped = lease_lost}};
+handle_event(info, gakudan_lease_lost, _State, _Data) ->
+    keep_state_and_data;
 handle_event(_Type, _Event, _State, _Data) ->
     keep_state_and_data.
 
 terminate(Reason, State, Data) ->
     StopReason = stop_reason(Data, Reason),
-    case State of
-        awaiting_human -> ok;
+    case {StopReason, State} of
+        %% Lost-lease teardown: the new owner holds the run; writing here would
+        %% be refused anyway. Do not touch the store.
+        {lease_lost, _} -> ok;
+        {_, awaiting_human} -> ok;
         _ -> save_snapshot(snapshot_status(StopReason), Data)
     end,
     emit_run_stop(Data, StopReason),
@@ -702,7 +728,7 @@ save_snapshot(Status, #data{checkpointer = Handle} = Data) ->
             undefined -> #{entries => [], kv => #{}};
             _ -> gakudan_blackboard:snapshot(BB)
         end,
-    Snapshot = #{
+    Snapshot0 = #{
         run_id => RunId,
         status => Status,
         config => Config,
@@ -715,8 +741,23 @@ save_snapshot(Status, #data{checkpointer = Handle} = Data) ->
         fanout => Data#data.fanout,
         updated_at => erlang:system_time(millisecond)
     },
-    _ = gakudan_checkpointer:save_snapshot(Handle, Snapshot),
+    Snapshot = maybe_add_lease(Snapshot0),
+    case gakudan_checkpointer:save_snapshot(Handle, Snapshot) of
+        {error, lease_lost} -> self() ! gakudan_lease_lost;
+        _ -> ok
+    end,
     ok.
+
+maybe_add_lease(Snapshot) ->
+    case gakudan_lease:enabled() of
+        true ->
+            Snapshot#{
+                owner => gakudan_lease:owner_id(),
+                lease_ttl_ms => gakudan_lease:ttl_ms()
+            };
+        false ->
+            Snapshot
+    end.
 
 interrupt_body(Reason) when is_binary(Reason) ->
     <<"interrupted: ", Reason/binary>>;

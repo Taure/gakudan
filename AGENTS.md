@@ -49,8 +49,12 @@ into its telemetry, ticket, and dashboard seams.
 - **In:** the behaviours, the run / blackboard / router / turn machinery, the
   LLM adapters (Anthropic, Gemini, Vertex, stub), streaming, persistence, the
   MCP client, guardrails, audit, budgets, the examples.
-- **Out:** multi-node distribution; a web dashboard (that is `gakudan_liveboard`);
-  app-specific persistence schemas or auth.
+- **Out:** BEAM clustering / distributed Erlang (no `net_kernel`, global
+  registry, or run migration). Horizontal scale-out and HA are done by
+  shared-nothing nodes coordinating through the shared checkpointer store
+  (run leasing, [ADR 0023](docs/adr/0023-run-leasing.md)), not by clustering.
+  Also out: a web dashboard (that is `gakudan_liveboard`); app-specific
+  persistence schemas or auth.
 - **Out forever:** anything that warps the library for a single consumer. If a
   change is driven by one app's need, it probably belongs in that app. When in
   doubt, keep gakudan general-purpose.

@@ -24,7 +24,13 @@ it is safe to run without Docker. Connection is overridable via
     audit_record_and_list/1,
     audit_verify_intact_chain/1,
     audit_tamper_breaks_chain/1,
-    resumer_respawns_active_run/1
+    resumer_respawns_active_run/1,
+    lease_claim_and_contention/1,
+    lease_expiry_reclaim/1,
+    lease_fenced_write/1,
+    lease_renew_holds/1,
+    lease_release_frees/1,
+    lease_owned_insert/1
 ]).
 
 -define(REPO, gakudan_test_repo).
@@ -40,7 +46,13 @@ all() ->
         audit_record_and_list,
         audit_verify_intact_chain,
         audit_tamper_breaks_chain,
-        resumer_respawns_active_run
+        resumer_respawns_active_run,
+        lease_claim_and_contention,
+        lease_expiry_reclaim,
+        lease_fenced_write,
+        lease_renew_holds,
+        lease_release_frees,
+        lease_owned_insert
     ].
 
 %%----------------------------------------------------------------------
@@ -223,6 +235,91 @@ resumer_respawns_active_run(_Config) ->
     end.
 
 %%----------------------------------------------------------------------
+%% Run leasing (ADR 0023). Lease expiry is second-resolution (utc_datetime),
+%% so expiry tests claim with a 1ms TTL and sleep past a second boundary.
+%%----------------------------------------------------------------------
+
+lease_claim_and_contention(_Config) ->
+    H = checkpointer(),
+    ok = gakudan_checkpointer:save_snapshot(H, snapshot(~"L1", idle)),
+    {ok, Claimed} = gakudan_checkpointer:claim_runs(H, ~"node-a", #{
+        lease_ttl_ms => 60000, limit => 10
+    }),
+    ?assertEqual([~"L1"], [maps:get(run_id, S) || S <- Claimed]),
+    %% A freshly-leased run cannot be stolen by another owner.
+    ?assertEqual(
+        {ok, []},
+        gakudan_checkpointer:claim_runs(H, ~"node-b", #{lease_ttl_ms => 60000, limit => 10})
+    ).
+
+lease_expiry_reclaim(_Config) ->
+    H = checkpointer(),
+    ok = gakudan_checkpointer:save_snapshot(H, snapshot(~"L2", running)),
+    {ok, [_]} = gakudan_checkpointer:claim_runs(H, ~"node-a", #{lease_ttl_ms => 1, limit => 10}),
+    timer:sleep(2200),
+    {ok, Reclaimed} = gakudan_checkpointer:claim_runs(H, ~"node-b", #{
+        lease_ttl_ms => 60000, limit => 10
+    }),
+    ?assertEqual([~"L2"], [maps:get(run_id, S) || S <- Reclaimed]).
+
+lease_fenced_write(_Config) ->
+    H = checkpointer(),
+    RunId = ~"L3",
+    ok = gakudan_checkpointer:save_snapshot(H, owned_snapshot(RunId, running, ~"node-a", 1)),
+    timer:sleep(2200),
+    {ok, [_]} = gakudan_checkpointer:claim_runs(H, ~"node-b", #{lease_ttl_ms => 60000, limit => 10}),
+    %% The old owner's write is refused; the new owner's succeeds.
+    ?assertEqual(
+        {error, lease_lost},
+        gakudan_checkpointer:save_snapshot(H, owned_snapshot(RunId, idle, ~"node-a", 60000))
+    ),
+    ?assertEqual(
+        ok,
+        gakudan_checkpointer:save_snapshot(H, owned_snapshot(RunId, idle, ~"node-b", 60000))
+    ).
+
+lease_renew_holds(_Config) ->
+    H = checkpointer(),
+    RunId = ~"L4",
+    ok = gakudan_checkpointer:save_snapshot(H, owned_snapshot(RunId, running, ~"node-a", 1)),
+    timer:sleep(1100),
+    %% A renews before B can steal.
+    ?assertEqual({ok, [RunId]}, gakudan_checkpointer:renew_leases(H, ~"node-a", [RunId], 60000)),
+    ?assertEqual(
+        {ok, []},
+        gakudan_checkpointer:claim_runs(H, ~"node-b", #{lease_ttl_ms => 60000, limit => 10})
+    ),
+    %% Renewing a run owned by someone else holds nothing.
+    ?assertEqual({ok, []}, gakudan_checkpointer:renew_leases(H, ~"node-b", [RunId], 60000)).
+
+lease_release_frees(_Config) ->
+    H = checkpointer(),
+    RunId = ~"L5",
+    ok = gakudan_checkpointer:save_snapshot(H, owned_snapshot(RunId, running, ~"node-a", 60000)),
+    ?assertEqual(
+        {ok, []},
+        gakudan_checkpointer:claim_runs(H, ~"node-b", #{lease_ttl_ms => 60000, limit => 10})
+    ),
+    ok = gakudan_checkpointer:release_run(H, ~"node-a", RunId),
+    {ok, Claimed} = gakudan_checkpointer:claim_runs(H, ~"node-b", #{
+        lease_ttl_ms => 60000, limit => 10
+    }),
+    ?assertEqual([RunId], [maps:get(run_id, S) || S <- Claimed]).
+
+lease_owned_insert(_Config) ->
+    H = checkpointer(),
+    RunId = ~"L6",
+    %% A run started under leasing: its first save is an owner-tagged insert
+    %% (no prior row), which must land with the owner set.
+    ok = gakudan_checkpointer:save_snapshot(H, owned_snapshot(RunId, running, ~"node-a", 60000)),
+    {ok, Loaded} = gakudan_checkpointer:load_snapshot(H, RunId),
+    ?assertEqual(running, maps:get(status, Loaded)),
+    ?assertEqual(
+        {ok, []},
+        gakudan_checkpointer:claim_runs(H, ~"node-b", #{lease_ttl_ms => 60000, limit => 10})
+    ).
+
+%%----------------------------------------------------------------------
 %% Helpers
 %%----------------------------------------------------------------------
 
@@ -248,6 +345,9 @@ snapshot(RunId, Status) ->
         turn => 0,
         updated_at => erlang:system_time(millisecond)
     }.
+
+owned_snapshot(RunId, Status, Owner, TtlMs) ->
+    (snapshot(RunId, Status))#{owner => Owner, lease_ttl_ms => TtlMs}.
 
 audit_event(Type, RunId) ->
     #{
