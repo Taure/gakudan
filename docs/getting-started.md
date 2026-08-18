@@ -157,6 +157,13 @@ export ANTHROPIC_API_KEY=sk-ant-...
 llm => {gakudan_llm_anthropic, #{}}
 ```
 
+Prefer the environment variable over an inline `api_key => ~"sk-ant-..."` in
+the run config. Credentials are stripped before a run is checkpointed, so a
+run resumed unattended (by `gakudan_runs_resumer`, or by another node under
+leasing) re-reads the key from the environment. A node that resumes runs with
+neither the env var nor a live in-memory credential ends the run rather than
+retrying forever. See [ADR 0003](adr/0003-checkpointer-behaviour.md).
+
 The Anthropic backend marks the system prompt and tool definitions with
 `cache_control: ephemeral` automatically, so multi-turn runs hit prompt
 caching at ~10% of the uncached input-token rate.

@@ -79,11 +79,27 @@ start_run(#{fork_from := ForkPoint} = Config0) ->
 start_run(Config0) ->
     Config = ensure_run_id(Config0),
     ok = warn_unserialisable(Config),
-    gakudan_runs_sup:start_run(stash_llm_spec(Config)).
+    with_stashed_spec(Config, fun(Safe) -> gakudan_runs_sup:start_run(Safe) end).
 
-stash_llm_spec(#{run_id := RunId, llm := Spec} = Config) ->
+%% The vault entry is only ever cleared by the run's own teardown, so a start
+%% that never produces a run would strand the credential in ETS for the life of
+%% the node. Clear it on any non-{ok,...} outcome, including a raise.
+with_stashed_spec(#{run_id := RunId, llm := Spec} = Config, Start) ->
     ok = gakudan_registry:put_llm_spec(RunId, Spec),
-    gakudan_checkpointer:redact_config(Config).
+    Safe = gakudan_checkpointer:redact_config(Config),
+    try Start(Safe) of
+        {ok, _, _} = Ok ->
+            Ok;
+        Other ->
+            ok = gakudan_registry:forget_llm_spec(RunId),
+            Other
+    catch
+        Class:Reason:St ->
+            ok = gakudan_registry:forget_llm_spec(RunId),
+            erlang:raise(Class, Reason, St)
+    end;
+with_stashed_spec(Config, _Start) ->
+    {error, {missing_config_key, llm, maps:get(run_id, Config, undefined)}}.
 
 fork_run(ForkPoint, Config) ->
     case resolve_checkpointer(Config) of
@@ -98,8 +114,9 @@ fork_run(ForkPoint, Config) ->
                             Merged = maps:merge(
                                 maps:get(config, Snapshot), maps:with([llm], Config)
                             ),
-                            Safe = stash_llm_spec(Merged),
-                            gakudan_runs_sup:resume_run(Safe, Snapshot#{config => Safe});
+                            with_stashed_spec(Merged, fun(Safe) ->
+                                gakudan_runs_sup:resume_run(Safe, Snapshot#{config => Safe})
+                            end);
                         {error, _} = Err ->
                             Err
                     end;
@@ -114,7 +131,7 @@ warn_unserialisable(Config) ->
             ok;
         _ ->
             Persisted = gakudan_checkpointer:redact_config(Config),
-            case [K || {K, V} <- maps:to_list(Persisted), holds_fun(V)] of
+            case maps:keys(maps:filter(fun(_K, V) -> holds_fun(V) end, Persisted)) of
                 [] ->
                     ok;
                 Keys ->

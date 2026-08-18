@@ -5,19 +5,6 @@
 
 -include_lib("kernel/include/logger.hrl").
 
--define(SECRET_LLM_OPTS, [api_key, access_token, token_fun]).
-
-%% A missing credential is not a transient turn failure: every subsequent turn
-%% fails the same way, and an `idle` run is re-resumed on every node boot.
--define(IS_CREDENTIAL_ERROR(R),
-    (R =:= {error, {llm_error, no_api_key}} orelse
-        R =:= {error, no_api_key} orelse
-        R =:= {throw, {llm_error, no_api_key}} orelse
-        R =:= {error, {llm_error, {bad_config, missing_access_token}}})
-).
-
--export([format_status/1]).
-
 -export([start_link/2, start_link/3, send/2, status/1, stop/1, await/2, wait_ready/1]).
 -export([interrupt/2, resume/2, cancel/1]).
 -export([callback_mode/0, init/1, handle_event/4, terminate/3]).
@@ -122,7 +109,7 @@ init({fresh, RunSup, Config}) ->
         router_mod = RMod,
         router_state = RouterState,
         llm_mod = LMod,
-        llm_opts = LOpts,
+        llm_opts = gakudan_checkpointer:redact_opts(LOpts),
         max_turns = MaxTurns,
         checkpointer = Checkpointer,
         audit = init_audit(Config),
@@ -157,7 +144,7 @@ init({resume, RunSup, Config, Snapshot}) ->
         router_mod = RMod,
         router_state = RouterState,
         llm_mod = LMod,
-        llm_opts = LOpts,
+        llm_opts = gakudan_checkpointer:redact_opts(LOpts),
         max_turns = MaxTurns,
         turn = Turn,
         last_step = LastStep,
@@ -228,28 +215,31 @@ handle_event(info, {turn_cancelled, Pid, Usage}, running, #data{turn_workers = T
     demonitor_worker(TW),
     finish_worker(Pid, accumulate_usage(Data, Usage));
 handle_event(info, {turn_failed, Pid, Reason}, running, #data{turn_workers = TWs} = Data) when
-    is_map_key(Pid, TWs), ?IS_CREDENTIAL_ERROR(Reason)
-->
-    TW = maps:get(Pid, TWs),
-    emit_turn_stop(Data, TW, failed, Reason),
-    demonitor_worker(TW),
-    ?LOG_ERROR(#{
-        msg => "run has no usable LLM credential; tearing down instead of idling",
-        run_id => Data#data.run_id,
-        backend => Data#data.llm_mod
-    }),
-    append_turn_failure(Data, ~"run stopped: no usable LLM credential", Reason),
-    Data1 = Data#data{stopped = no_credentials},
-    stop_run_async(Data1, ~"no-credentials teardown failed"),
-    {keep_state, Data1};
-handle_event(info, {turn_failed, Pid, Reason}, running, #data{turn_workers = TWs} = Data) when
     is_map_key(Pid, TWs)
 ->
     TW = maps:get(Pid, TWs),
     emit_turn_stop(Data, TW, failed, Reason),
     demonitor_worker(TW),
-    append_turn_failure(Data, ~"turn failed", Reason),
-    finish_worker(Pid, Data);
+    case {credential_error(Reason), Data#data.stopped} of
+        %% Every later turn hits this identically, and an idle run is re-resumed
+        %% on every node boot, so end it once instead. Only the first arrival
+        %% acts: under fanout all N workers fail the same way.
+        {true, undefined} ->
+            ?LOG_ERROR(#{
+                msg => "run has no usable LLM credential; tearing down instead of idling",
+                run_id => Data#data.run_id,
+                backend => Data#data.llm_mod
+            }),
+            append_turn_failure(Data, ~"run stopped: no usable LLM credential", Reason),
+            Data1 = Data#data{stopped = no_credentials},
+            stop_run_async(Data1, ~"no-credentials teardown failed"),
+            {keep_state, Data1};
+        {true, _AlreadyStopping} ->
+            {keep_state, Data};
+        {false, _} ->
+            append_turn_failure(Data, ~"turn failed", Reason),
+            finish_worker(Pid, Data)
+    end;
 handle_event(
     info, {'DOWN', _MonRef, process, Pid, Reason}, running, #data{turn_workers = TWs} = Data
 ) when
@@ -320,16 +310,7 @@ handle_event(info, gakudan_lease_lost, _State, #data{stopped = undefined} = Data
         #{count => 1},
         #{run_id => Data#data.run_id}
     ),
-    RunSup = Data#data.run_sup,
-    RunId = Data#data.run_id,
-    _ = spawn(fun() ->
-        case gakudan_runs_sup:stop_run(RunSup) of
-            ok ->
-                ok;
-            {error, Why} ->
-                ?LOG_WARNING(#{msg => "lease-lost teardown failed", run_id => RunId, reason => Why})
-        end
-    end),
+    stop_run_async(Data, ~"lease-lost teardown failed"),
     {keep_state, Data#data{stopped = lease_lost}};
 handle_event(info, gakudan_lease_lost, _State, _Data) ->
     keep_state_and_data;
@@ -349,6 +330,9 @@ terminate(Reason, State, Data) ->
     emit_audit_best_effort(Data, run_stopped, #{reason => StopReason}),
     gakudan_registry:unregister(Data#data.run_id),
     ok.
+
+credential_error({_Class, {llm_error, Reason}}) -> gakudan_llm:error_class(Reason) =:= credential;
+credential_error(_Other) -> false.
 
 stop_run_async(#data{run_sup = RunSup, run_id = RunId}, FailMsg) ->
     _ = spawn(fun() ->
@@ -435,7 +419,7 @@ spawn_worker(AgentId, TurnNumber, Data) ->
         run_id = RunId,
         agents = Agents,
         llm_mod = LMod,
-        llm_opts = LOpts,
+        llm_opts = StoredOpts,
         blackboard = BB,
         stream = Stream,
         checkpointer = Checkpointer,
@@ -445,6 +429,7 @@ spawn_worker(AgentId, TurnNumber, Data) ->
         context = Context
     } = Data,
     {AgentMod, _AgentOpts} = maps:get(AgentId, Agents),
+    LOpts = live_llm_opts(RunId, StoredOpts),
     Self = self(),
     StartTime = erlang:monotonic_time(),
     emit_turn_start(RunId, AgentId, TurnNumber),
@@ -731,16 +716,7 @@ stop_for_budget(Data, {Mod, Reason} = DenyInfo) ->
     %% Tear the whole run down via the runs supervisor, asynchronously so we
     %% are not blocked terminating our own supervisor. terminate/3 reads the
     %% marker to report the budget reason rather than the shutdown reason.
-    RunSup = Data#data.run_sup,
-    RunId = Data#data.run_id,
-    _ = spawn(fun() ->
-        case gakudan_runs_sup:stop_run(RunSup) of
-            ok ->
-                ok;
-            {error, Why} ->
-                ?LOG_WARNING(#{msg => "budget stop teardown failed", run_id => RunId, reason => Why})
-        end
-    end),
+    stop_run_async(Data, ~"budget stop teardown failed"),
     {keep_state, Data#data{stopped = {budget_exceeded, DenyInfo}}}.
 
 append_initial_messages(#data{config = Config, blackboard = BB} = Data) ->
@@ -789,21 +765,21 @@ save_snapshot(Status, #data{checkpointer = Handle} = Data) ->
     end,
     ok.
 
--doc false.
-format_status(#{data := #data{llm_opts = Opts, config = Config} = D} = Status) ->
-    Status#{
-        data => D#data{
-            llm_opts = maps:without(?SECRET_LLM_OPTS, Opts),
-            config = gakudan_checkpointer:redact_config(Config)
-        }
-    };
-format_status(Status) ->
-    Status.
-
 live_llm_spec(RunId, Config) ->
     case gakudan_registry:llm_spec(RunId) of
         {ok, Spec} -> Spec;
         {error, not_found} -> maps:get(llm, Config)
+    end.
+
+%% #data holds only redacted opts. The credential is fetched per dispatch so it
+%% lives in the short-lived turn worker, never in long-lived gen_statem state
+%% that sys:get_state/1 would hand to any process on the node. A vault miss is
+%% the legitimate unattended-resume path: fall back and let the backend resolve
+%% from the environment.
+live_llm_opts(RunId, StoredOpts) ->
+    case gakudan_registry:llm_spec(RunId) of
+        {ok, {_Mod, Opts}} -> Opts;
+        {error, not_found} -> StoredOpts
     end.
 
 maybe_add_lease(Snapshot) ->

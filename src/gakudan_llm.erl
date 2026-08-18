@@ -15,6 +15,7 @@ it transparently fall back to `complete/2` wrapped in a single
 """.
 
 -export([stream/4]).
+-export([error_class/1]).
 
 -export_type([request/0, response/0, content_block/0, usage/0, stream_event/0, tool_choice/0]).
 
@@ -85,6 +86,34 @@ stream(Backend, Request, Opts, Subscriber) ->
         false ->
             synthesize_stream(Backend, Request, Opts, Subscriber)
     end.
+
+-doc """
+Classify a backend error reason.
+
+One vocabulary, two consumers: `m:gakudan_llm_retry` retries `transient`, and
+the run statem ends the run on `credential` rather than idling forever on an
+error every later turn will hit identically. Keeping both readings here stops
+them drifting - 401 belonged in neither list while they were separate.
+
+- `transient` - worth retrying: timeouts, 429, 5xx, connection-level errors.
+- `credential` - the node cannot authenticate: missing, revoked or rejected
+  key. Retrying and resuming are both pointless.
+- `fatal` - everything else, including other 4xx.
+""".
+-spec error_class(term()) -> transient | credential | fatal.
+error_class(timeout) -> transient;
+error_class({http_error, 429, _Body}) -> transient;
+error_class({http_error, Code, _Body}) when is_integer(Code), Code >= 500 -> transient;
+error_class({failed_connect, _}) -> transient;
+error_class(closed) -> transient;
+error_class(econnrefused) -> transient;
+error_class(no_api_key) -> credential;
+error_class({http_error, 401, _Body}) -> credential;
+error_class({http_error, 403, _Body}) -> credential;
+error_class({bad_config, missing_access_token}) -> credential;
+error_class({bad_config, missing_project}) -> credential;
+error_class({bad_config, missing_location}) -> credential;
+error_class(_Other) -> fatal.
 
 synthesize_stream(Backend, Request, Opts, Subscriber) ->
     Ref = maps:get(stream_request_id, Opts),

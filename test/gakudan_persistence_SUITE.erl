@@ -12,6 +12,10 @@
     checkpoint_redacts_llm_secrets/1,
     checkpoint_redacts_nested_llm_secrets/1,
     missing_credential_stops_the_run/1,
+    invalid_credential_stops_the_run/1,
+    failed_start_does_not_leak_the_credential/1,
+    credential_survives_a_supervised_restart/1,
+    composed_credential_absent_from_status/1,
     fork_keeps_caller_llm_spec/1,
     credential_absent_from_supervisor_and_status/1,
     tool_result_round_trip/1,
@@ -32,6 +36,10 @@ all() ->
         checkpoint_redacts_llm_secrets,
         checkpoint_redacts_nested_llm_secrets,
         missing_credential_stops_the_run,
+        invalid_credential_stops_the_run,
+        failed_start_does_not_leak_the_credential,
+        credential_survives_a_supervised_restart,
+        composed_credential_absent_from_status,
         fork_keeps_caller_llm_spec,
         credential_absent_from_supervisor_and_status,
         tool_result_round_trip,
@@ -283,6 +291,87 @@ missing_credential_stops_the_run(Config) ->
     %% and therefore the resumer will not pick it up again on the next boot
     {ok, Active} = gakudan_checkpointer:list_active(Handle),
     false = lists:any(fun(S) -> maps:get(run_id, S) =:= RunId end, Active).
+
+composed_credential_absent_from_status(_Config) ->
+    Key = ~"sk-ant-composed-must-not-log",
+    {ok, Script} = gakudan_llm_stub_script:start_link([{text, ~"ack"}]),
+    {ok, Sup, RunId} = gakudan:start_run(#{
+        agents => [agent_a_mod],
+        router => {gakudan_router_round_robin, #{}},
+        llm =>
+            {gakudan_llm_retry, #{
+                base_delay => 1,
+                backend => {gakudan_llm_stub, #{script_owner => Script, api_key => Key}}
+            }},
+        max_turns => 1
+    }),
+    {run_statem, Pid, _, _} = lists:keyfind(run_statem, 1, supervisor:which_children(Sup)),
+
+    Status = sys:get_status(Pid),
+    nomatch = binary:match(iolist_to_binary(io_lib:format("~p", [Status])), Key),
+
+    %% sys:get_state/1 is NOT routed through format_status/1, so the state
+    %% itself must not hold the credential.
+    State = sys:get_state(Pid),
+    nomatch = binary:match(iolist_to_binary(io_lib:format("~p", [State])), Key),
+
+    ok = gakudan:stop(RunId),
+    gen_server:stop(Script).
+
+failed_start_does_not_leak_the_credential(_Config) ->
+    RunId = ~"leak-probe-run",
+    Res = gakudan:start_run(#{
+        run_id => RunId,
+        agents => [agent_a_mod],
+        router => {gakudan_router_round_robin, #{}},
+        llm => {gakudan_llm_stub, #{api_key => ~"sk-must-not-survive"}},
+        checkpointer => {no_such_checkpointer_mod, #{}}
+    }),
+    {error, _} = Res,
+    {error, not_found} = gakudan_registry:llm_spec(RunId).
+
+credential_survives_a_supervised_restart(_Config) ->
+    Key = ~"sk-must-survive-a-restart",
+    {ok, Script} = gakudan_llm_stub_script:start_link([{text, ~"ack"}]),
+    {ok, Sup, RunId} = gakudan:start_run(#{
+        agents => [agent_a_mod],
+        router => {gakudan_router_round_robin, #{}},
+        llm => {gakudan_llm_stub, #{script_owner => Script, api_key => Key}},
+        max_turns => 1
+    }),
+    {ok, {gakudan_llm_stub, Before}} = gakudan_registry:llm_spec(RunId),
+    Key = maps:get(api_key, Before),
+
+    %% run_sup is one_for_all: killing a sibling restarts the statem, whose
+    %% terminate/3 must NOT take the credential with it.
+    {stream, StreamPid, _, _} = lists:keyfind(stream, 1, supervisor:which_children(Sup)),
+    MRef = erlang:monitor(process, StreamPid),
+    exit(StreamPid, kill),
+    receive
+        {'DOWN', MRef, process, _, _} -> ok
+    after 5000 -> ct:fail(stream_did_not_die)
+    end,
+    timer:sleep(200),
+
+    {ok, {gakudan_llm_stub, After}} = gakudan_registry:llm_spec(RunId),
+    Key = maps:get(api_key, After),
+
+    _ = gakudan:stop(RunId),
+    gen_server:stop(Script).
+
+invalid_credential_stops_the_run(Config) ->
+    Backend = proplists:get_value(backend, Config),
+    {ok, _Sup, RunId} = gakudan:start_run(#{
+        agents => [agent_a_mod],
+        router => {gakudan_router_round_robin, #{}},
+        llm => {rejected_credential_llm_mod, #{}},
+        max_turns => 4
+    }),
+    ok = gakudan:send(RunId, ~"go"),
+    ok = wait_until_gone(RunId, 5000),
+    {ok, Handle} = gakudan_checkpointer:init(gakudan_checkpointer_ets, Backend),
+    {ok, Snap} = gakudan_checkpointer:load_snapshot(Handle, RunId),
+    failed = maps:get(status, Snap).
 
 initial_messages_populate_blackboard(_Config) ->
     {ok, Script} = gakudan_llm_stub_script:start_link([{text, ~"ack"}]),

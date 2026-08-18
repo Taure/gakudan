@@ -34,7 +34,8 @@ Two collections live in this contract:
     claim_runs/3,
     renew_leases/4,
     release_run/3,
-    redact_config/1
+    redact_config/1,
+    redact_opts/1
 ]).
 
 -export_type([
@@ -172,12 +173,21 @@ redact_spec({Mod, Opts}) when is_map(Opts) ->
 redact_spec(Spec) ->
     Spec.
 
+-doc "Strip credential-bearing keys from one LLM opts map, recursively.".
+-spec redact_opts(map()) -> map().
 redact_opts(Opts) ->
     maps:map(fun(_K, V) -> redact_nested(V) end, maps:without(?SECRET_LLM_OPTS, Opts)).
 
-redact_nested({Mod, Inner}) when is_atom(Mod), is_map(Inner) -> redact_spec({Mod, Inner});
-redact_nested(L) when is_list(L) -> [redact_nested(E) || E <- L];
-redact_nested(V) -> V.
+redact_nested({Mod, Inner}) when is_atom(Mod), is_map(Inner) ->
+    redact_spec({Mod, Inner});
+redact_nested(M) when is_map(M) ->
+    maps:map(fun(_K, V) -> redact_nested(V) end, M);
+redact_nested(T) when is_tuple(T) ->
+    list_to_tuple([redact_nested(E) || E <- tuple_to_list(T)]);
+redact_nested(L) when is_list(L) ->
+    [redact_nested(E) || E <- L];
+redact_nested(V) ->
+    V.
 
 -doc "Load a snapshot by run_id. Telemetry-wrapped.".
 -spec load_snapshot({module(), state()}, gakudan:run_id()) ->

@@ -128,13 +128,7 @@ max_delay(Opts) -> maps:get(max_delay, Opts, ?DEFAULT_MAX_DELAY).
 
 -doc "Whether an error reason is transient and worth retrying.".
 -spec transient(term()) -> boolean().
-transient(timeout) -> true;
-transient({http_error, 429, _Body}) -> true;
-transient({http_error, Code, _Body}) when is_integer(Code), Code >= 500 -> true;
-transient({failed_connect, _}) -> true;
-transient(closed) -> true;
-transient(econnrefused) -> true;
-transient(_Other) -> false.
+transient(Reason) -> gakudan_llm:error_class(Reason) =:= transient.
 
 -doc "Exponential backoff for `Attempt` (1-based), capped at `MaxDelay` ms.".
 -spec backoff_delay(pos_integer(), non_neg_integer(), non_neg_integer()) -> non_neg_integer().
