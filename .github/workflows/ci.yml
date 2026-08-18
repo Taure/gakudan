@@ -11,6 +11,12 @@ on:
     paths-ignore:
       - 'docs/**'
       - '**.md'
+  # paths-ignore means a docs-only stretch produces no CI run at all, so a
+  # dependency moving underneath a pin is invisible. This repo went ~2.5
+  # months that way and its Postgres suite rotted unnoticed (#67).
+  schedule:
+    - cron: '23 5 * * 1'
+  workflow_dispatch:
 
 jobs:
   ci:
@@ -27,6 +33,12 @@ jobs:
       enable-audit: true
       enable-coverage: true
       enable-elp-lint: false
+      # Diff-scoped: only lines a PR changes are mutated, so this gates new
+      # code without demanding a retroactive sweep of every existing test.
+      # Measured baseline across the conventionally-named modules is 81.9%.
+      enable-mutate: true
+      mutate-diff: true
+      mutate-min-score: 75
       enable-elp-eqwalize: false
       enable-sbom: true
       enable-sbom-scan: true

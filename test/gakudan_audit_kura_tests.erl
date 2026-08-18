@@ -1,6 +1,14 @@
 -module(gakudan_audit_kura_tests).
 -include_lib("eunit/include/eunit.hrl").
 
+record_contains_a_driver_raise_test() ->
+    %% kura_driver_minato raises out of transaction/2 on a rolled-back COMMIT.
+    %% That used to escape record/2's `ok | {error, _}` spec and crash the run
+    %% statem instead of reaching the audit on_error policy. Any repo-layer
+    %% raise must come back as a value; an unconfigured repo raises here.
+    Result = gakudan_audit_kura:record(#{repo => no_such_repo_module}, event()),
+    ?assertMatch({error, {transaction_failed, error, _}}, Result).
+
 event_hash_is_stable_test() ->
     Event = event(),
     ?assertEqual(
