@@ -434,7 +434,10 @@ intervened. Configure a sink and attach an actor:
 
 The default `gakudan_audit_kura` sink writes one append-only row per event
 (any kura backend), lifting `actor.id` and `actor.tenant` into their own
-columns and hashing each row for tamper detection. Events covered:
+columns and hashing each row into a per-run chain. The chain is unkeyed and
+stored alongside the data it protects, so it detects corruption and casual
+tampering, not an attacker with write access - see `m:gakudan_audit_kura` and
+issue #68. Events covered:
 `run_started`, `run_resumed`, `run_interrupted`, `run_stopped`, and every
 guardrail decision (`guardrail_allow` / `guardrail_transform` /
 `guardrail_block`). `on_error` is `log` (warn and continue) or
