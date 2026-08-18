@@ -9,6 +9,7 @@
     interrupt_then_resume/1,
     initial_messages_populate_blackboard/1,
     snapshot_persists_through_lifecycle/1,
+    checkpoint_redacts_llm_secrets/1,
     tool_result_round_trip/1,
     tool_not_re_executed_on_replay/1,
     supervised_restart_restores_run/1,
@@ -24,6 +25,7 @@ all() ->
         interrupt_then_resume,
         initial_messages_populate_blackboard,
         snapshot_persists_through_lifecycle,
+        checkpoint_redacts_llm_secrets,
         tool_result_round_trip,
         tool_not_re_executed_on_replay,
         supervised_restart_restores_run,
@@ -111,6 +113,37 @@ interrupt_then_resume(_Config) ->
         end,
         Entries
     ),
+    ok = gakudan:stop(RunId),
+    gen_server:stop(Script).
+
+checkpoint_redacts_llm_secrets(Config) ->
+    Backend = proplists:get_value(backend, Config),
+    {ok, Script} = gakudan_llm_stub_script:start_link([{text, ~"ack"}]),
+    {ok, _Sup, RunId} = gakudan:start_run(#{
+        agents => [agent_a_mod],
+        router => {gakudan_router_round_robin, #{}},
+        llm =>
+            {gakudan_llm_stub, #{
+                script_owner => Script,
+                api_key => ~"sk-ant-must-not-be-persisted",
+                access_token => ~"ya29-must-not-be-persisted"
+            }},
+        max_turns => 1
+    }),
+    ok = gakudan:send(RunId, ~"go"),
+    {ok, _} = gakudan:await(RunId, 5000),
+
+    {ok, Handle} = gakudan_checkpointer:init(gakudan_checkpointer_ets, Backend),
+    {ok, Snapshot} = gakudan_checkpointer:load_snapshot(Handle, RunId),
+    {gakudan_llm_stub, Opts} = maps:get(llm, maps:get(config, Snapshot)),
+
+    false = maps:is_key(api_key, Opts),
+    false = maps:is_key(access_token, Opts),
+    true = maps:is_key(script_owner, Opts),
+
+    nomatch = binary:match(term_to_binary(Snapshot), ~"sk-ant-must-not-be-persisted"),
+    nomatch = binary:match(term_to_binary(Snapshot), ~"ya29-must-not-be-persisted"),
+
     ok = gakudan:stop(RunId),
     gen_server:stop(Script).
 

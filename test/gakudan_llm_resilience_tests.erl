@@ -51,7 +51,9 @@ retry_transient_classification_test() ->
     ?assert(gakudan_llm_retry:transient(timeout)),
     ?assert(gakudan_llm_retry:transient({http_error, 503, ~"x"})),
     ?assert(gakudan_llm_retry:transient(closed)),
+    ?assert(gakudan_llm_retry:transient({http_error, 429, ~"rate limited"})),
     ?assertNot(gakudan_llm_retry:transient({http_error, 400, ~"x"})),
+    ?assertNot(gakudan_llm_retry:transient({http_error, 404, ~"x"})),
     ?assertNot(gakudan_llm_retry:transient(no_api_key)),
     ?assertNot(gakudan_llm_retry:transient(cancelled)).
 
@@ -80,6 +82,42 @@ retry_gives_up_after_max_attempts_test() ->
     },
     ?assertEqual({error, timeout}, gakudan_llm_retry:complete(?REQ, Opts)),
     stop_results(Pid).
+
+retry_retries_rate_limit_test() ->
+    Pid = spawn_results([{error, {http_error, 429, ~"slow down"}}, {ok, ?OK_RESP}]),
+    Opts = #{
+        backend => {scripted_llm_mod, #{results => Pid}},
+        max_attempts => 3,
+        base_delay => 1
+    },
+    ?assertEqual({ok, ?OK_RESP}, gakudan_llm_retry:complete(?REQ, Opts)),
+    stop_results(Pid).
+
+retry_backoff_is_cancellable_test() ->
+    Pid = spawn_results([{error, timeout}, {ok, ?OK_RESP}]),
+    self() ! gakudan_llm_cancel,
+    Opts = #{
+        backend => {scripted_llm_mod, #{results => Pid}},
+        max_attempts => 3,
+        base_delay => 5000
+    },
+    ?assertEqual({error, cancelled}, gakudan_llm_retry:complete(?REQ, Opts)),
+    stop_results(Pid).
+
+retry_backoff_without_cancel_still_retries_test() ->
+    Pid = spawn_results([{error, timeout}, {ok, ?OK_RESP}]),
+    Opts = #{
+        backend => {scripted_llm_mod, #{results => Pid}},
+        max_attempts => 3,
+        base_delay => 1
+    },
+    ?assertEqual({ok, ?OK_RESP}, gakudan_llm_retry:complete(?REQ, Opts)),
+    ?assertEqual(0, mailbox_len()),
+    stop_results(Pid).
+
+mailbox_len() ->
+    {messages, M} = erlang:process_info(self(), messages),
+    length(M).
 
 retry_does_not_retry_client_error_test() ->
     Pid = spawn_results([{error, {http_error, 400, ~"bad"}}, {ok, ?OK_RESP}]),

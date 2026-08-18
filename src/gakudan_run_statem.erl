@@ -5,6 +5,8 @@
 
 -include_lib("kernel/include/logger.hrl").
 
+-define(SECRET_LLM_OPTS, [api_key, access_token, token_fun]).
+
 -export([start_link/2, start_link/3, send/2, status/1, stop/1, await/2, wait_ready/1]).
 -export([interrupt/2, resume/2, cancel/1]).
 -export([callback_mode/0, init/1, handle_event/4, terminate/3]).
@@ -731,7 +733,7 @@ save_snapshot(Status, #data{checkpointer = Handle} = Data) ->
     Snapshot0 = #{
         run_id => RunId,
         status => Status,
-        config => Config,
+        config => redact_config(Config),
         last_step => LastStep,
         blackboard => maps:get(entries, BBSnap),
         kv => maps:get(kv, BBSnap),
@@ -747,6 +749,19 @@ save_snapshot(Status, #data{checkpointer = Handle} = Data) ->
         _ -> ok
     end,
     ok.
+
+redact_config(#{llm := {Mod, Opts}} = Config) ->
+    Dropped = [K || K <- ?SECRET_LLM_OPTS, is_map_key(K, Opts)],
+    case Dropped of
+        [] ->
+            Config;
+        _ ->
+            ?LOG_DEBUG(#{
+                msg => "redacting llm opts from checkpoint",
+                keys => Dropped
+            }),
+            Config#{llm => {Mod, maps:without(?SECRET_LLM_OPTS, Opts)}}
+    end.
 
 maybe_add_lease(Snapshot) ->
     case gakudan_lease:enabled() of

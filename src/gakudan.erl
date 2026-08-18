@@ -18,6 +18,8 @@ gakudan:send(RunId, ~"Build a small TCP echo server in Erlang."),
 ```
 """.
 
+-include_lib("kernel/include/logger.hrl").
+
 -export([start_run/1, send/2, status/1, stop/1, await/2, interrupt/2, resume/2, cancel/1]).
 -export([subscribe_stream/1, unsubscribe_stream/2]).
 
@@ -75,6 +77,7 @@ start_run(#{fork_from := ForkPoint} = Config0) ->
     fork_run(ForkPoint, Config);
 start_run(Config0) ->
     Config = ensure_run_id(Config0),
+    ok = warn_unserialisable(Config),
     gakudan_runs_sup:start_run(Config).
 
 fork_run(ForkPoint, Config) ->
@@ -95,6 +98,31 @@ fork_run(ForkPoint, Config) ->
                     Err
             end
     end.
+
+warn_unserialisable(Config) ->
+    case resolve_checkpointer(Config) of
+        undefined ->
+            ok;
+        _ ->
+            case [K || {K, V} <- maps:to_list(Config), holds_fun(V)] of
+                [] ->
+                    ok;
+                Keys ->
+                    ?LOG_WARNING(#{
+                        msg =>
+                            "run config holds a fun under a checkpointer; "
+                            "the snapshot cannot be resumed after a code change",
+                        keys => Keys
+                    }),
+                    ok
+            end
+    end.
+
+holds_fun(V) when is_function(V) -> true;
+holds_fun(V) when is_map(V) -> lists:any(fun holds_fun/1, maps:values(V));
+holds_fun(V) when is_list(V) -> lists:any(fun holds_fun/1, V);
+holds_fun(V) when is_tuple(V) -> lists:any(fun holds_fun/1, tuple_to_list(V));
+holds_fun(_) -> false.
 
 resolve_checkpointer(Config) ->
     case maps:get(checkpointer, Config, undefined) of
