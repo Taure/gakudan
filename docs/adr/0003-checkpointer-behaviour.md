@@ -142,13 +142,16 @@ Per step record:
 - **Credentials anywhere they would be logged.** The run's real `llm` spec
   lives in `gakudan_registry` and never enters the config that travels into
   supervisor child specs or snapshots, because a supervisor crash report
-  prints `mfargs` verbatim at ERROR level. `gakudan_run_statem:format_status/1`
-  covers `sys:get_status/1` and the gen_statem crash report.
+  prints `mfargs` verbatim at ERROR level. The statem's `#data` holds only
+  redacted opts and the live spec is fetched inside the turn worker at
+  dispatch, so the credential never enters gen_statem state - which also
+  covers `sys:get_state/1`, a surface no `format_status/1` callback can
+  intercept.
 - **Credentials in LLM `Opts`**. `api_key`, `access_token` and `token_fun`
   are stripped by `gakudan_checkpointer:redact_config/1` on the way to
-  storage, recursively through `backend` and `backends` so a
-  `gakudan_llm_fallback` or `gakudan_llm_retry` composition cannot smuggle
-  one through. Note `base_url` is deliberately NOT stripped: it is required
+  storage, recursively through maps, tuples and lists so neither a
+  `gakudan_llm_fallback` / `gakudan_llm_retry` composition nor a consumer's
+  own composed backend can smuggle one through. Note `base_url` is deliberately NOT stripped: it is required
   to route a resumed run through the same gateway. A `base_url` carrying an
   embedded token is therefore persisted - put the credential in `api_key`,
   not in the URL.

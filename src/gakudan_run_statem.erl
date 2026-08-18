@@ -32,6 +32,7 @@
     budget = undefined :: undefined | gakudan_budget:ref(),
     used = #{tokens_in => 0, tokens_out => 0, llm_calls => 0} :: gakudan_turn:usage(),
     stopped = undefined :: undefined | term(),
+    credential_source = environment :: vault | environment,
     cancelling = false :: boolean(),
     turn_workers = #{} ::
         #{
@@ -110,6 +111,7 @@ init({fresh, RunSup, Config}) ->
         router_state = RouterState,
         llm_mod = LMod,
         llm_opts = gakudan_checkpointer:redact_opts(LOpts),
+        credential_source = credential_source(RunId),
         max_turns = MaxTurns,
         checkpointer = Checkpointer,
         audit = init_audit(Config),
@@ -145,6 +147,7 @@ init({resume, RunSup, Config, Snapshot}) ->
         router_state = RouterState,
         llm_mod = LMod,
         llm_opts = gakudan_checkpointer:redact_opts(LOpts),
+        credential_source = credential_source(RunId),
         max_turns = MaxTurns,
         turn = Turn,
         last_step = LastStep,
@@ -429,11 +432,17 @@ spawn_worker(AgentId, TurnNumber, Data) ->
         context = Context
     } = Data,
     {AgentMod, _AgentOpts} = maps:get(AgentId, Agents),
-    LOpts = live_llm_opts(RunId, StoredOpts),
     Self = self(),
     StartTime = erlang:monotonic_time(),
     emit_turn_start(RunId, AgentId, TurnNumber),
     {Pid, MonRef} = spawn_monitor(fun() ->
+        %% Resolved HERE, not in the statem: the registry read is a
+        %% gen_server:call, so doing it in handle_event/4 lets a stalled
+        %% registry take down the statem and, under one_for_all, the whole
+        %% run. In the worker a stall fails one turn, which turn_failed and
+        %% 'DOWN' already handle. It also keeps the credential off the
+        %% statem's heap entirely rather than merely out of its state.
+        LOpts = live_llm_opts(RunId, StoredOpts),
         try
             case
                 gakudan_turn:run(
@@ -588,6 +597,7 @@ emit_run_start(Data) ->
             agents => Data#data.agent_ids,
             router => Data#data.router_mod,
             llm_backend => Data#data.llm_mod,
+            credential_source => Data#data.credential_source,
             max_turns => Data#data.max_turns
         }
     ).
@@ -776,6 +786,18 @@ live_llm_spec(RunId, Config) ->
 %% that sys:get_state/1 would hand to any process on the node. A vault miss is
 %% the legitimate unattended-resume path: fall back and let the backend resolve
 %% from the environment.
+%% Reported once per run rather than logged per turn: every unattended-resumed
+%% run legitimately misses the vault (gakudan_runs_resumer and
+%% gakudan_lease_server call resume_run/2 directly), so a per-turn line would
+%% fire on every turn of every resumed run. An atom in run-start telemetry
+%% answers "which of my runs are authenticating from the environment" without
+%% the noise, and never carries the credential itself.
+credential_source(RunId) ->
+    case gakudan_registry:llm_spec(RunId) of
+        {ok, _} -> vault;
+        {error, not_found} -> environment
+    end.
+
 live_llm_opts(RunId, StoredOpts) ->
     case gakudan_registry:llm_spec(RunId) of
         {ok, {_Mod, Opts}} -> Opts;

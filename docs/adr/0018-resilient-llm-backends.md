@@ -67,3 +67,35 @@ to other backends.
   downstream.
 - Fallback across providers can mean a turn silently switches model
   families; the warning log records each fall-through so this is observable.
+
+## Amendment (2026-08-18): one error vocabulary, and a separate 429 budget
+
+Classification moved to `gakudan_llm:error_class/1`, returning
+`transient | credential | fatal`. `gakudan_llm_retry:transient/1` is now
+defined over it, and `gakudan_run_statem` acts on `credential` by ending the
+run instead of idling.
+
+The reason is drift. Two modules were enumerating the same provider
+vocabulary independently - the retry backend deciding what to retry, the
+statem deciding what was fatal - and HTTP 401 and 403 appeared in neither. A
+revoked or expired key therefore behaved exactly like a transient failure:
+the turn failed, the run went `idle`, `is_active/1` counted it as live, and
+`gakudan_runs_resumer` re-resumed it on every node boot while `await/2`
+reported success. One enumeration cannot drift against itself.
+
+`error_class/1` is a plain function on the behaviour module rather than a
+callback, so the vocabulary is closed: a third-party backend returning its
+own error shape classifies as `fatal` and inherits the old idle-forever
+behaviour. Backends should return the reasons listed there. Making it an
+optional callback is the obvious extension if a consumer backend needs it.
+
+429 is retried on `max_rate_limit_attempts` (default 2) rather than the
+general `max_attempts`, because retrying is offered load into a limiter that
+has just said stop, and the multipliers compound across router iterations,
+fanout agents and fallback backends - measured at 3x request volume for one
+user message through a loop router over three retry-wrapped backends. Backoff
+is jittered so workers that failed together do not retry in lockstep.
+`Retry-After` is still not honoured: `{http_error, Code, Body}` carries no
+headers, and surfacing them changes the backend error contract across every
+adapter. That remains open.
+

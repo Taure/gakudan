@@ -79,15 +79,14 @@ start_run(#{fork_from := ForkPoint} = Config0) ->
 start_run(Config0) ->
     Config = ensure_run_id(Config0),
     ok = warn_unserialisable(Config),
-    with_stashed_spec(Config, fun(Safe) -> gakudan_runs_sup:start_run(Safe) end).
+    with_stashed_spec(Config, fun gakudan_runs_sup:start_run/1).
 
 %% The vault entry is only ever cleared by the run's own teardown, so a start
 %% that never produces a run would strand the credential in ETS for the life of
 %% the node. Clear it on any non-{ok,...} outcome, including a raise.
-with_stashed_spec(#{run_id := RunId, llm := Spec} = Config, Start) ->
+with_stashed_spec(#{run_id := RunId, llm := Spec} = Config, Continue) ->
     ok = gakudan_registry:put_llm_spec(RunId, Spec),
-    Safe = gakudan_checkpointer:redact_config(Config),
-    try Start(Safe) of
+    try Continue(gakudan_checkpointer:redact_config(Config)) of
         {ok, _, _} = Ok ->
             Ok;
         Other ->
@@ -98,7 +97,7 @@ with_stashed_spec(#{run_id := RunId, llm := Spec} = Config, Start) ->
             ok = gakudan_registry:forget_llm_spec(RunId),
             erlang:raise(Class, Reason, St)
     end;
-with_stashed_spec(Config, _Start) ->
+with_stashed_spec(Config, _Continue) ->
     {error, {missing_config_key, llm, maps:get(run_id, Config, undefined)}}.
 
 fork_run(ForkPoint, Config) ->

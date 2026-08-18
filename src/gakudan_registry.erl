@@ -50,13 +50,11 @@ lookup(RunId) ->
 
 -spec put_llm_spec(gakudan:run_id(), term()) -> ok.
 put_llm_spec(RunId, Spec) ->
-    ok = gen_server:call(?MODULE, {put_llm_spec, RunId, Spec}),
-    ok.
+    ok = gen_server:call(?MODULE, {put_llm_spec, RunId, Spec}).
 
 -spec forget_llm_spec(gakudan:run_id()) -> ok.
 forget_llm_spec(RunId) ->
-    ok = gen_server:call(?MODULE, {forget_llm_spec, RunId}),
-    ok.
+    ok = gen_server:call(?MODULE, {forget_llm_spec, RunId}).
 
 -spec llm_spec(gakudan:run_id()) -> {ok, term()} | {error, not_found}.
 llm_spec(RunId) ->

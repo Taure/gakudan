@@ -1,5 +1,6 @@
 -module(gakudan_persistence_SUITE).
 -include_lib("common_test/include/ct.hrl").
+-include_lib("eunit/include/eunit.hrl").
 
 -export([all/0, init_per_suite/1, end_per_suite/1, init_per_testcase/2, end_per_testcase/2]).
 -export([
@@ -15,6 +16,9 @@
     invalid_credential_stops_the_run/1,
     failed_start_does_not_leak_the_credential/1,
     credential_survives_a_supervised_restart/1,
+    raising_start_does_not_leak_the_credential/1,
+    live_credential_reaches_the_backend/1,
+    stalled_registry_does_not_kill_the_run/1,
     composed_credential_absent_from_status/1,
     fork_keeps_caller_llm_spec/1,
     credential_absent_from_supervisor_and_status/1,
@@ -39,6 +43,9 @@ all() ->
         invalid_credential_stops_the_run,
         failed_start_does_not_leak_the_credential,
         credential_survives_a_supervised_restart,
+        raising_start_does_not_leak_the_credential,
+        live_credential_reaches_the_backend,
+        stalled_registry_does_not_kill_the_run,
         composed_credential_absent_from_status,
         fork_keeps_caller_llm_spec,
         credential_absent_from_supervisor_and_status,
@@ -358,6 +365,56 @@ credential_survives_a_supervised_restart(_Config) ->
 
     _ = gakudan:stop(RunId),
     gen_server:stop(Script).
+
+stalled_registry_does_not_kill_the_run(_Config) ->
+    {ok, Script} = gakudan_llm_stub_script:start_link([{text, ~"a"}]),
+    {ok, Sup, RunId} = gakudan:start_run(#{
+        agents => [agent_a_mod],
+        router => {gakudan_router_round_robin, #{}},
+        llm => {gakudan_llm_stub, #{script_owner => Script, api_key => ~"sk-x"}},
+        max_turns => 1
+    }),
+    {run_statem, Statem, _, _} = lists:keyfind(run_statem, 1, supervisor:which_children(Sup)),
+    ok = sys:suspend(gakudan_registry),
+    _ = spawn(fun() -> gakudan:send(RunId, ~"go") end),
+    timer:sleep(6500),
+    Alive = is_process_alive(Statem),
+    ok = sys:resume(gakudan_registry),
+    ?assert(Alive),
+    _ = gakudan:stop(RunId),
+    gen_server:stop(Script).
+
+live_credential_reaches_the_backend(_Config) ->
+    Key = ~"sk-live-key-must-reach-backend",
+    Self = self(),
+    {ok, _Sup, RunId} = gakudan:start_run(#{
+        agents => [agent_a_mod],
+        router => {gakudan_router_round_robin, #{}},
+        llm => {opts_probe_llm_mod, #{api_key => Key, probe_owner => Self}},
+        max_turns => 1
+    }),
+    ok = gakudan:send(RunId, ~"go"),
+    receive
+        {seen_opts, Opts} -> ?assertEqual(Key, maps:get(api_key, Opts, missing))
+    after 5000 -> ct:fail(backend_never_called)
+    end,
+    _ = gakudan:stop(RunId).
+
+raising_start_does_not_leak_the_credential(_Config) ->
+    RunId = ~"raise-probe-run",
+    _ =
+        try
+            gakudan:start_run(#{
+                run_id => RunId,
+                agents => [agent_a_mod],
+                router => {gakudan_router_round_robin, #{}},
+                llm => {gakudan_llm_stub, #{api_key => ~"sk-must-not-survive-a-raise"}},
+                checkpointer => not_a_valid_spec
+            })
+        catch
+            _:_ -> raised
+        end,
+    ?assertEqual({error, not_found}, gakudan_registry:llm_spec(RunId)).
 
 invalid_credential_stops_the_run(Config) ->
     Backend = proplists:get_value(backend, Config),
