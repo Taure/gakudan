@@ -25,12 +25,12 @@
 otp_app() -> gakudan.
 
 start() ->
-    application:set_env(pg_types, uuid_format, string),
     application:set_env(kura, dialect, kura_dialect_pg),
     application:set_env(gakudan, gakudan_test_repo, #{
         pool => gakudan_test_repo,
-        pool_module => kura_pool_pgo,
-        driver_module => kura_driver_pgo,
+        backend => kura_backend_postgres,
+        pool_module => kura_pool_minato,
+        driver_module => kura_driver_minato,
         database => env(~"GAKUDAN_TEST_DB", ~"gakudan_test"),
         hostname => env(~"GAKUDAN_TEST_DB_HOST", ~"localhost"),
         port => env_int(~"GAKUDAN_TEST_DB_PORT", 5555),

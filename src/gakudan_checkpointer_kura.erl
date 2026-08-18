@@ -116,11 +116,13 @@ save_snapshot_owned(Repo, Snapshot, Owner) ->
                 Err
         end
     end,
-    case kura_repo_worker:transaction(Repo, Fun) of
+    try kura_repo_worker:transaction(Repo, Fun) of
         ok -> ok;
         lease_lost -> {error, lease_lost};
         {error, _} = Err -> Err;
         Other -> {error, {save_snapshot_failed, Other}}
+    catch
+        Class:Reason -> {error, {save_snapshot_failed, {Class, Reason}}}
     end.
 
 insert_owned(Repo, Snapshot, Owner, ExpDt) ->
@@ -310,10 +312,12 @@ claim_runs(#{repo := Repo}, OwnerId, #{lease_ttl_ms := Ttl, limit := Limit}) ->
                 Err
         end
     end,
-    case kura_repo_worker:transaction(Repo, Fun) of
+    try kura_repo_worker:transaction(Repo, Fun) of
         {ok, Snaps} -> {ok, Snaps};
         {error, _} = Err -> Err;
         Other -> {error, {claim_failed, Other}}
+    catch
+        Class:Reason -> {error, {claim_failed, {Class, Reason}}}
     end.
 
 -spec renew_leases(state(), gakudan_checkpointer:owner_id(), [gakudan:run_id()], pos_integer()) ->

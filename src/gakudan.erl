@@ -18,6 +18,8 @@ gakudan:send(RunId, ~"Build a small TCP echo server in Erlang."),
 ```
 """.
 
+-include_lib("kernel/include/logger.hrl").
+
 -export([start_run/1, send/2, status/1, stop/1, await/2, interrupt/2, resume/2, cancel/1]).
 -export([subscribe_stream/1, unsubscribe_stream/2]).
 
@@ -72,10 +74,48 @@ fresh run id; the source run is untouched. Forking requires a checkpointer
 -spec start_run(run_config()) -> {ok, pid(), run_id()} | {error, term()}.
 start_run(#{fork_from := ForkPoint} = Config0) ->
     Config = ensure_run_id(maps:remove(fork_from, Config0)),
+    ok = warn_unserialisable(Config),
     fork_run(ForkPoint, Config);
 start_run(Config0) ->
     Config = ensure_run_id(Config0),
-    gakudan_runs_sup:start_run(Config).
+    ok = warn_unserialisable(Config),
+    with_stashed_spec(Config, fun gakudan_runs_sup:start_run/1).
+
+%% The credential must not travel in the config: that config becomes the
+%% run_sup child spec's mfargs, which a supervisor crash report prints verbatim
+%% at ERROR level. So the real llm spec is stashed under a fresh reference and
+%% only the reference travels. A reference is unforgeable and unguessable, so
+%% unlike a caller-supplied run_id two concurrent callers cannot collide on one
+%% and end up reading each other's credential.
+with_stashed_spec(#{llm := Spec} = Config, Continue) ->
+    Ref = make_ref(),
+    ok = gakudan_registry:put_llm_spec(Ref, Spec),
+    Safe = (gakudan_checkpointer:redact_config(Config))#{credential_ref => Ref},
+    try Continue(Safe) of
+        {ok, _, _} = Ok ->
+            Ok;
+        Other ->
+            ok = forget_if_no_run(Ref, Config),
+            Other
+    catch
+        Class:Reason:St ->
+            ok = forget_if_no_run(Ref, Config),
+            erlang:raise(Class, Reason, St)
+    end;
+with_stashed_spec(Config, _Continue) ->
+    {error, {missing_config_key, llm, maps:get(run_id, Config, undefined)}}.
+
+%% start_run/1 can fail AFTER the run is alive: gakudan_runs_sup waits on
+%% wait_ready with a timeout, so a slow snapshot load raises while the statem
+%% is running perfectly well. Forgetting the credential then would leave a live
+%% run silently authenticating from the environment, or tear it down as
+%% no_credentials and mark it failed, which the resumer excludes forever. Only
+%% reap when no run came out of the start.
+forget_if_no_run(Ref, #{run_id := RunId}) ->
+    case gakudan_registry:lookup(RunId) of
+        {error, not_found} -> gakudan_registry:forget_llm_spec(Ref);
+        {ok, _Entry} -> ok
+    end.
 
 fork_run(ForkPoint, Config) ->
     case resolve_checkpointer(Config) of
@@ -87,7 +127,12 @@ fork_run(ForkPoint, Config) ->
                     NewRunId = maps:get(run_id, Config),
                     case gakudan_fork:build_snapshot(Handle, ForkPoint, NewRunId) of
                         {ok, Snapshot} ->
-                            gakudan_runs_sup:resume_run(maps:get(config, Snapshot), Snapshot);
+                            Merged = maps:merge(
+                                maps:get(config, Snapshot), maps:with([llm], Config)
+                            ),
+                            with_stashed_spec(Merged, fun(Safe) ->
+                                gakudan_runs_sup:resume_run(Safe, Snapshot#{config => Safe})
+                            end);
                         {error, _} = Err ->
                             Err
                     end;
@@ -95,6 +140,37 @@ fork_run(ForkPoint, Config) ->
                     Err
             end
     end.
+
+warn_unserialisable(Config) ->
+    case resolve_checkpointer(Config) of
+        undefined ->
+            ok;
+        _ ->
+            Persisted = gakudan_checkpointer:redact_config(Config),
+            case maps:keys(maps:filter(fun(_K, V) -> holds_fun(V) end, Persisted)) of
+                [] ->
+                    ok;
+                Keys ->
+                    ?LOG_WARNING(#{
+                        msg =>
+                            "run config holds a fun under a checkpointer; "
+                            "the snapshot cannot be resumed after a code change",
+                        keys => Keys
+                    }),
+                    ok
+            end
+    end.
+
+holds_fun(V) when is_function(V) ->
+    true;
+holds_fun(V) when is_map(V) ->
+    lists:any(fun holds_fun/1, maps:keys(V)) orelse lists:any(fun holds_fun/1, maps:values(V));
+holds_fun([H | T]) ->
+    holds_fun(H) orelse holds_fun(T);
+holds_fun(V) when is_tuple(V) ->
+    lists:any(fun holds_fun/1, tuple_to_list(V));
+holds_fun(_) ->
+    false.
 
 resolve_checkpointer(Config) ->
     case maps:get(checkpointer, Config, undefined) of

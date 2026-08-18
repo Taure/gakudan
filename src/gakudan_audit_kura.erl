@@ -52,13 +52,20 @@ init(_) ->
     {error, {bad_config, missing_repo}}.
 
 -spec record(state(), gakudan_audit:event()) -> ok | {error, term()}.
+%% kura_driver_minato raises `transaction_rolled_back` out of transaction/2
+%% when COMMIT reports a rollback, so a bare case/2 lets that escape past this
+%% spec and past the caller's on_error policy. Catch it here: a DB blip on an
+%% audit or snapshot write must be a value the policy layer can act on, not a
+%% crash in the run statem.
 record(#{repo := Repo}, Event) ->
     Fun = fun() -> insert_chained(Repo, Event) end,
-    case kura_repo_worker:transaction(Repo, Fun) of
+    try kura_repo_worker:transaction(Repo, Fun) of
         ok -> ok;
         {ok, _} -> ok;
         {error, _} = Err -> Err;
         Other -> {error, Other}
+    catch
+        Class:Reason -> {error, {transaction_failed, Class, Reason}}
     end.
 
 insert_chained(Repo, Event) ->

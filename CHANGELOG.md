@@ -74,6 +74,62 @@ and gakudan uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **LLM credentials no longer reach the checkpoint, supervisor child specs,
+  crash reports or `sys:get_status`.** The run's real `llm` spec is held in
+  `gakudan_registry` for the life of the run; the config that travels into
+  `gakudan_runs_sup`, `gakudan_run_sup`'s child spec and every snapshot is a
+  redacted copy carrying a `credential_ref`; the real spec is stashed in
+  `gakudan_registry` under that reference and read once at `init/1`.
+  `gakudan_run_statem:format_status/1` redacts `llm_opts`, `config` and
+  `agents`, so `sys:get_status/1` and the gen_statem crash report are clean.
+  `sys:get_state/1` still returns the live credential - see ADR 0003 for why
+  that is accepted. Previously a supervisor `child_terminated` or
+  `start_error` report - triggered by any crash, or a bad checkpointer spec -
+  printed the whole config including `api_key` at ERROR level, and
+  `sys:get_status/1` returned it to any process on the node.
+- **One error vocabulary.** New `gakudan_llm:error_class/1` classifies a
+  backend error as `transient | credential | fatal`;
+  `gakudan_llm_retry:transient/1` is defined over it and the run statem acts
+  on `credential`. Previously the retry backend and the statem enumerated
+  provider errors separately and had drifted: HTTP 401 and 403 - a revoked or
+  expired key, the common production case - were in neither, so a rejected
+  key idled forever exactly like a missing one.
+- **The stash is keyed on an unforgeable reference**, in a `private` ETS table
+  read through the owner. It survives a supervised restart, is reaped when the
+  run supervisor dies, and is cleared if `start_run/1` fails - but only when no
+  run actually started, since `start_run/1` can raise on a `wait_ready` timeout
+  while the run is alive and healthy.
+- `gakudan_registry:stash_count/0` reports how many credentials the node holds.
+  It never returns one.
+- **A run with no usable LLM credential now fails instead of idling forever.**
+  `{error, no_api_key}` used to be appended to the blackboard as transcript
+  text, leaving the run `idle` - which `is_active/1` counts as live, so
+  `gakudan_runs_resumer` re-resumed it on every node boot, and `await/2`
+  returned `{ok, Entries}` as if it had succeeded. The run now tears down and
+  snapshots as `failed`.
+- **LLM credentials are no longer written to the checkpoint.**
+  `gakudan_checkpointer:save_snapshot/2` now strips `api_key`,
+  `access_token` and `token_fun` from the persisted run config, recursively
+  through composed `backend`/`backends` specs. Previously an inline key was
+  stored in plain text in `gakudan_runs.data` and every backup of it.
+  **Breaking for unattended resume if you pass a key inline and do not set
+  the matching environment variable.** The backends fall back to
+  `ANTHROPIC_API_KEY`, `GEMINI_API_KEY` and `GOOGLE_VERTEX_TOKEN`; a run
+  resumed by `gakudan_runs_resumer` with neither will now fail with
+  `{error, no_api_key}` where it previously succeeded. Set the env var on
+  any node that resumes runs. See ADR 0003.
+- `gakudan_llm_retry` retries HTTP 429, on a tighter budget than 5xx -
+  `max_rate_limit_attempts`, default 2 - because retrying is offered load
+  into a limiter that just said stop, and the multipliers compound across
+  router iterations, fanout agents and fallback backends. Backoff is now
+  jittered so co-failing fanout workers do not retry in lockstep.
+  `Retry-After` is not honoured: the `{http_error, Code, Body}` shape carries
+  no headers.
+- `gakudan_llm_retry`'s backoff is interruptible. A `gakudan_llm_cancel`
+  arriving mid-backoff previously sat unread until the next attempt had
+  already been issued; it now ends the call promptly, and on the streaming
+  path emits the `{cancelled, #{}}` event to the subscriber.
+
 - `gakudan_agent:tool_spec()` widened from `module()` to
   `gakudan_tool:ref()` (which is `module() | {module(), map()}`).
 

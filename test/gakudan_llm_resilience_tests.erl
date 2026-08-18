@@ -51,7 +51,9 @@ retry_transient_classification_test() ->
     ?assert(gakudan_llm_retry:transient(timeout)),
     ?assert(gakudan_llm_retry:transient({http_error, 503, ~"x"})),
     ?assert(gakudan_llm_retry:transient(closed)),
+    ?assert(gakudan_llm_retry:transient({http_error, 429, ~"rate limited"})),
     ?assertNot(gakudan_llm_retry:transient({http_error, 400, ~"x"})),
+    ?assertNot(gakudan_llm_retry:transient({http_error, 404, ~"x"})),
     ?assertNot(gakudan_llm_retry:transient(no_api_key)),
     ?assertNot(gakudan_llm_retry:transient(cancelled)).
 
@@ -80,6 +82,113 @@ retry_gives_up_after_max_attempts_test() ->
     },
     ?assertEqual({error, timeout}, gakudan_llm_retry:complete(?REQ, Opts)),
     stop_results(Pid).
+
+retry_retries_rate_limit_test() ->
+    Pid = spawn_results([{error, {http_error, 429, ~"slow down"}}, {ok, ?OK_RESP}]),
+    Opts = #{
+        backend => {scripted_llm_mod, #{results => Pid}},
+        max_attempts => 3,
+        base_delay => 1
+    },
+    ?assertEqual({ok, ?OK_RESP}, gakudan_llm_retry:complete(?REQ, Opts)),
+    stop_results(Pid).
+
+retry_backoff_is_interrupted_test_() ->
+    {timeout, 30, fun() ->
+        Pid = spawn_results([{error, timeout}, {ok, ?OK_RESP}]),
+        Self = self(),
+        spawn(fun() ->
+            timer:sleep(100),
+            Self ! gakudan_llm_cancel
+        end),
+        Opts = #{
+            backend => {scripted_llm_mod, #{results => Pid}},
+            max_attempts => 3,
+            base_delay => 10000,
+            max_delay => 60000
+        },
+        T0 = erlang:monotonic_time(millisecond),
+        Result = gakudan_llm_retry:complete(?REQ, Opts),
+        Elapsed = erlang:monotonic_time(millisecond) - T0,
+        stop_results(Pid),
+        ?assertEqual({error, cancelled}, Result),
+        ?assert(Elapsed < 1000)
+    end}.
+
+retry_cancelled_backoff_leaves_clean_mailbox_test() ->
+    Pid = spawn_results([{error, timeout}, {ok, ?OK_RESP}]),
+    self() ! gakudan_llm_cancel,
+    Opts = #{backend => {scripted_llm_mod, #{results => Pid}}, base_delay => 5000},
+    ?assertEqual({error, cancelled}, gakudan_llm_retry:complete(?REQ, Opts)),
+    stop_results(Pid),
+    ?assertEqual({messages, []}, erlang:process_info(self(), messages)).
+
+retry_stream_backoff_cancel_notifies_subscriber_test() ->
+    Pid = spawn_results([{error, timeout}, {ok, ?OK_RESP}]),
+    Ref = make_ref(),
+    Sub = spawn_collector(self()),
+    self() ! gakudan_llm_cancel,
+    Opts = #{
+        backend => {scripted_llm_mod, #{results => Pid}},
+        stream_request_id => Ref,
+        base_delay => 5000
+    },
+    ?assertEqual({error, cancelled}, gakudan_llm_retry:stream_call(?REQ, Opts, Sub)),
+    stop_results(Pid),
+    receive
+        {collected, Events} -> ?assertEqual([{cancelled, #{}}], Events)
+    after 1000 -> ?assert(false)
+    end.
+
+spawn_collector(Parent) ->
+    spawn(fun() -> collect(Parent, []) end).
+
+collect(Parent, Acc) ->
+    receive
+        {gakudan_llm_stream, _R, Ev} -> collect(Parent, [Ev | Acc])
+    after 300 -> Parent ! {collected, lists:reverse(Acc)}
+    end.
+
+retry_backoff_without_cancel_still_retries_test() ->
+    Pid = spawn_results([{error, timeout}, {ok, ?OK_RESP}]),
+    Opts = #{
+        backend => {scripted_llm_mod, #{results => Pid}},
+        max_attempts => 3,
+        base_delay => 1
+    },
+    ?assertEqual({ok, ?OK_RESP}, gakudan_llm_retry:complete(?REQ, Opts)),
+    stop_results(Pid).
+
+retry_rate_limit_budget_is_tighter_than_5xx_test() ->
+    Pid = spawn_results(lists:duplicate(6, {error, {http_error, 429, ~"slow"}})),
+    Opts = #{backend => {scripted_llm_mod, #{results => Pid}}, base_delay => 1},
+    ?assertEqual({error, {http_error, 429, ~"slow"}}, gakudan_llm_retry:complete(?REQ, Opts)),
+    stop_results(Pid).
+
+retry_rate_limit_budget_is_configurable_test() ->
+    Pid = spawn_results([
+        {error, {http_error, 429, ~"slow"}},
+        {error, {http_error, 429, ~"slow"}},
+        {error, {http_error, 429, ~"slow"}},
+        {ok, ?OK_RESP}
+    ]),
+    Opts = #{
+        backend => {scripted_llm_mod, #{results => Pid}},
+        base_delay => 1,
+        max_rate_limit_attempts => 4
+    },
+    ?assertEqual({ok, ?OK_RESP}, gakudan_llm_retry:complete(?REQ, Opts)),
+    stop_results(Pid).
+
+error_class_covers_credential_and_transient_test() ->
+    ?assertEqual(credential, gakudan_llm:error_class(no_api_key)),
+    ?assertEqual(credential, gakudan_llm:error_class({http_error, 401, ~"x"})),
+    ?assertEqual(credential, gakudan_llm:error_class({http_error, 403, ~"x"})),
+    ?assertEqual(transient, gakudan_llm:error_class({http_error, 429, ~"x"})),
+    ?assertEqual(transient, gakudan_llm:error_class({http_error, 503, ~"x"})),
+    ?assertEqual(transient, gakudan_llm:error_class(timeout)),
+    ?assertEqual(fatal, gakudan_llm:error_class({http_error, 400, ~"x"})),
+    ?assertEqual(fatal, gakudan_llm:error_class(cancelled)).
 
 retry_does_not_retry_client_error_test() ->
     Pid = spawn_results([{error, {http_error, 400, ~"bad"}}, {ok, ?OK_RESP}]),
