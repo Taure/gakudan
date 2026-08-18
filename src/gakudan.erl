@@ -74,11 +74,16 @@ fresh run id; the source run is untouched. Forking requires a checkpointer
 -spec start_run(run_config()) -> {ok, pid(), run_id()} | {error, term()}.
 start_run(#{fork_from := ForkPoint} = Config0) ->
     Config = ensure_run_id(maps:remove(fork_from, Config0)),
+    ok = warn_unserialisable(Config),
     fork_run(ForkPoint, Config);
 start_run(Config0) ->
     Config = ensure_run_id(Config0),
     ok = warn_unserialisable(Config),
-    gakudan_runs_sup:start_run(Config).
+    gakudan_runs_sup:start_run(stash_llm_spec(Config)).
+
+stash_llm_spec(#{run_id := RunId, llm := Spec} = Config) ->
+    ok = gakudan_registry:put_llm_spec(RunId, Spec),
+    gakudan_checkpointer:redact_config(Config).
 
 fork_run(ForkPoint, Config) ->
     case resolve_checkpointer(Config) of
@@ -90,7 +95,11 @@ fork_run(ForkPoint, Config) ->
                     NewRunId = maps:get(run_id, Config),
                     case gakudan_fork:build_snapshot(Handle, ForkPoint, NewRunId) of
                         {ok, Snapshot} ->
-                            gakudan_runs_sup:resume_run(maps:get(config, Snapshot), Snapshot);
+                            Merged = maps:merge(
+                                maps:get(config, Snapshot), maps:with([llm], Config)
+                            ),
+                            Safe = stash_llm_spec(Merged),
+                            gakudan_runs_sup:resume_run(Safe, Snapshot#{config => Safe});
                         {error, _} = Err ->
                             Err
                     end;
@@ -104,7 +113,8 @@ warn_unserialisable(Config) ->
         undefined ->
             ok;
         _ ->
-            case [K || {K, V} <- maps:to_list(Config), holds_fun(V)] of
+            Persisted = gakudan_checkpointer:redact_config(Config),
+            case [K || {K, V} <- maps:to_list(Persisted), holds_fun(V)] of
                 [] ->
                     ok;
                 Keys ->
@@ -118,11 +128,16 @@ warn_unserialisable(Config) ->
             end
     end.
 
-holds_fun(V) when is_function(V) -> true;
-holds_fun(V) when is_map(V) -> lists:any(fun holds_fun/1, maps:values(V));
-holds_fun(V) when is_list(V) -> lists:any(fun holds_fun/1, V);
-holds_fun(V) when is_tuple(V) -> lists:any(fun holds_fun/1, tuple_to_list(V));
-holds_fun(_) -> false.
+holds_fun(V) when is_function(V) ->
+    true;
+holds_fun(V) when is_map(V) ->
+    lists:any(fun holds_fun/1, maps:keys(V)) orelse lists:any(fun holds_fun/1, maps:values(V));
+holds_fun([H | T]) ->
+    holds_fun(H) orelse holds_fun(T);
+holds_fun(V) when is_tuple(V) ->
+    lists:any(fun holds_fun/1, tuple_to_list(V));
+holds_fun(_) ->
+    false.
 
 resolve_checkpointer(Config) ->
     case maps:get(checkpointer, Config, undefined) of

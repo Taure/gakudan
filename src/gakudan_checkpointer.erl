@@ -19,6 +19,8 @@ Two collections live in this contract:
   side effects are exactly-once at the library boundary (ADR 0009).
 """.
 
+-define(SECRET_LLM_OPTS, [api_key, access_token, token_fun]).
+
 -export([
     init/2,
     save_snapshot/2,
@@ -31,7 +33,8 @@ Two collections live in this contract:
     load_tool_result/3,
     claim_runs/3,
     renew_leases/4,
-    release_run/3
+    release_run/3,
+    redact_config/1
 ]).
 
 -export_type([
@@ -126,7 +129,8 @@ init(Mod, Opts) ->
 
 -doc "Persist a snapshot. Telemetry-wrapped.".
 -spec save_snapshot({module(), state()}, run_snapshot()) -> ok | {error, term()}.
-save_snapshot({Mod, State}, Snapshot) ->
+save_snapshot({Mod, State}, Snapshot0) ->
+    Snapshot = redact_snapshot(Snapshot0),
     #{run_id := RunId} = Snapshot,
     Bytes = erlang:external_size(Snapshot),
     StartMeta = #{run_id => RunId, kind => snapshot},
@@ -138,6 +142,42 @@ save_snapshot({Mod, State}, Snapshot) ->
             {Result, #{bytes => Bytes}, stop_meta(StartMeta, Result)}
         end
     ).
+
+-doc """
+Strip credential-bearing LLM options from a run config.
+
+Applied to every snapshot on its way to storage, so no writer can persist a
+key by forgetting to. Recurses through any nested `{Module, Opts}` spec, at any depth and under any
+key - `m:gakudan_llm_fallback`'s `backends`, `m:gakudan_llm_retry`'s `backend`,
+and whatever a consumer's own composed backend calls its children - because
+that is where credentials actually sit in the compositions
+[ADR 0018](docs/adr/0018-resilient-llm-backends.md) recommends.
+
+The backends re-resolve these from the environment when absent, so a resumed
+run still authenticates. See [ADR 0003](docs/adr/0003-checkpointer-behaviour.md).
+""".
+-spec redact_config(map()) -> map().
+redact_config(#{llm := Spec} = Config) ->
+    Config#{llm => redact_spec(Spec)};
+redact_config(Config) ->
+    Config.
+
+redact_snapshot(#{config := Config} = Snapshot) ->
+    Snapshot#{config => redact_config(Config)};
+redact_snapshot(Snapshot) ->
+    Snapshot.
+
+redact_spec({Mod, Opts}) when is_map(Opts) ->
+    {Mod, redact_opts(Opts)};
+redact_spec(Spec) ->
+    Spec.
+
+redact_opts(Opts) ->
+    maps:map(fun(_K, V) -> redact_nested(V) end, maps:without(?SECRET_LLM_OPTS, Opts)).
+
+redact_nested({Mod, Inner}) when is_atom(Mod), is_map(Inner) -> redact_spec({Mod, Inner});
+redact_nested(L) when is_list(L) -> [redact_nested(E) || E <- L];
+redact_nested(V) -> V.
 
 -doc "Load a snapshot by run_id. Telemetry-wrapped.".
 -spec load_snapshot({module(), state()}, gakudan:run_id()) ->

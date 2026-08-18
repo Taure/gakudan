@@ -112,8 +112,13 @@ Per snapshot, in `run_snapshot()`:
 - `status` - coarse lifecycle: pending → running ↔ idle ↔ awaiting_human → completed.
   Drives resumer behaviour.
 - `config` - full `gakudan:run_config()` map as supplied to `start_run/1`,
-  minus secrets. The LLM `Opts` portion is **not** persisted (see
-  Consequences); the host app re-supplies it on resume.
+  minus credentials. The LLM `Opts` portion **is** persisted, with the
+  credential-bearing keys removed: `api_key`, `access_token` and `token_fun`,
+  stripped at every level of a composed backend spec. The rest of the config
+  has to survive, because `gakudan_runs_resumer` and `gakudan_lease_server`
+  rebuild an unattended run from it and there is no host present to re-supply
+  anything. The backends re-resolve the stripped keys from the environment
+  (`ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `GOOGLE_VERTEX_TOKEN`) on resume.
 - `last_step` - monotonically-increasing step counter for idempotency.
 - `blackboard` - entries list and KV map captured by snapshotting the
   blackboard process.
@@ -134,9 +139,19 @@ Per step record:
 
 ### What we deliberately do not persist
 
-- **Secrets in LLM `Opts`**. API keys, base URLs that contain tokens,
-  and anything else that smells like a secret stays in caller config and
-  is re-supplied on resume.
+- **Credentials anywhere they would be logged.** The run's real `llm` spec
+  lives in `gakudan_registry` and never enters the config that travels into
+  supervisor child specs or snapshots, because a supervisor crash report
+  prints `mfargs` verbatim at ERROR level. `gakudan_run_statem:format_status/1`
+  covers `sys:get_status/1` and the gen_statem crash report.
+- **Credentials in LLM `Opts`**. `api_key`, `access_token` and `token_fun`
+  are stripped by `gakudan_checkpointer:redact_config/1` on the way to
+  storage, recursively through `backend` and `backends` so a
+  `gakudan_llm_fallback` or `gakudan_llm_retry` composition cannot smuggle
+  one through. Note `base_url` is deliberately NOT stripped: it is required
+  to route a resumed run through the same gateway. A `base_url` carrying an
+  embedded token is therefore persisted - put the credential in `api_key`,
+  not in the URL.
 - **Turn-worker process state**. Turns are short-lived, idempotent, and
   re-run on resume from the last completed step. Persisting an
   in-progress turn is more complex than re-running it.

@@ -10,6 +10,10 @@
     initial_messages_populate_blackboard/1,
     snapshot_persists_through_lifecycle/1,
     checkpoint_redacts_llm_secrets/1,
+    checkpoint_redacts_nested_llm_secrets/1,
+    missing_credential_stops_the_run/1,
+    fork_keeps_caller_llm_spec/1,
+    credential_absent_from_supervisor_and_status/1,
     tool_result_round_trip/1,
     tool_not_re_executed_on_replay/1,
     supervised_restart_restores_run/1,
@@ -26,6 +30,10 @@ all() ->
         initial_messages_populate_blackboard,
         snapshot_persists_through_lifecycle,
         checkpoint_redacts_llm_secrets,
+        checkpoint_redacts_nested_llm_secrets,
+        missing_credential_stops_the_run,
+        fork_keeps_caller_llm_spec,
+        credential_absent_from_supervisor_and_status,
         tool_result_round_trip,
         tool_not_re_executed_on_replay,
         supervised_restart_restores_run,
@@ -146,6 +154,135 @@ checkpoint_redacts_llm_secrets(Config) ->
 
     ok = gakudan:stop(RunId),
     gen_server:stop(Script).
+
+checkpoint_redacts_nested_llm_secrets(Config) ->
+    Backend = proplists:get_value(backend, Config),
+    {ok, Script} = gakudan_llm_stub_script:start_link([{text, ~"ack"}]),
+    {ok, _Sup, RunId} = gakudan:start_run(#{
+        agents => [agent_a_mod],
+        router => {gakudan_router_round_robin, #{}},
+        llm =>
+            {gakudan_llm_retry, #{
+                base_delay => 1,
+                backend =>
+                    {gakudan_llm_stub, #{
+                        script_owner => Script,
+                        api_key => ~"sk-ant-nested-must-not-persist"
+                    }}
+            }},
+        max_turns => 1
+    }),
+    ok = gakudan:send(RunId, ~"go"),
+    {ok, _} = gakudan:await(RunId, 5000),
+
+    {ok, Handle} = gakudan_checkpointer:init(gakudan_checkpointer_ets, Backend),
+    {ok, Snapshot} = gakudan_checkpointer:load_snapshot(Handle, RunId),
+    {gakudan_llm_retry, RetryOpts} = maps:get(llm, maps:get(config, Snapshot)),
+    {gakudan_llm_stub, Inner} = maps:get(backend, RetryOpts),
+
+    false = maps:is_key(api_key, Inner),
+    true = maps:is_key(script_owner, Inner),
+    1 = maps:get(base_delay, RetryOpts),
+    nomatch = binary:match(term_to_binary(Snapshot), ~"sk-ant-nested-must-not-persist"),
+
+    ok = gakudan:stop(RunId),
+    gen_server:stop(Script).
+
+credential_absent_from_supervisor_and_status(_Config) ->
+    Key = ~"sk-ant-must-not-reach-a-log",
+    {ok, Script} = gakudan_llm_stub_script:start_link([{text, ~"ack"}]),
+    {ok, Sup, RunId} = gakudan:start_run(#{
+        agents => [agent_a_mod],
+        router => {gakudan_router_round_robin, #{}},
+        llm => {gakudan_llm_stub, #{script_owner => Script, api_key => Key}},
+        max_turns => 1
+    }),
+    {run_statem, StatemPid, _, _} = lists:keyfind(
+        run_statem, 1, supervisor:which_children(Sup)
+    ),
+
+    %% sys:get_status is reachable by any process on the node, and the same
+    %% rendering is what a supervisor crash report prints.
+    Status = sys:get_status(StatemPid),
+    nomatch = binary:match(iolist_to_binary(io_lib:format("~p", [Status])), Key),
+
+    %% The child spec args are what `child_terminated` / `start_error` echo.
+    ChildSpecs = supervisor:get_childspec(Sup, run_statem),
+    nomatch = binary:match(iolist_to_binary(io_lib:format("~p", [ChildSpecs])), Key),
+
+    %% ...and the run still authenticates, because the real spec is vaulted.
+    {ok, {gakudan_llm_stub, Live}} = gakudan_registry:llm_spec(RunId),
+    Key = maps:get(api_key, Live),
+
+    ok = gakudan:stop(RunId),
+    gen_server:stop(Script).
+
+fork_keeps_caller_llm_spec(Config) ->
+    Backend = proplists:get_value(backend, Config),
+    {ok, Handle} = gakudan_checkpointer:init(gakudan_checkpointer_ets, Backend),
+    SrcId = ~"fork-src-llm",
+    ok = gakudan_checkpointer:save_snapshot(Handle, #{
+        run_id => SrcId,
+        status => idle,
+        config => #{
+            run_id => SrcId,
+            agents => [agent_a_mod],
+            router => {gakudan_router_round_robin, #{}},
+            llm => {gakudan_llm_stub, #{}}
+        },
+        last_step => 0,
+        blackboard => [#{seq => 1, role => user, content => ~"task", ts => 1}],
+        kv => #{},
+        router_state => undefined,
+        statem_state => idle,
+        turn => 1,
+        updated_at => erlang:system_time(millisecond)
+    }),
+    ok = gakudan_checkpointer:save_step(Handle, #{
+        run_id => SrcId,
+        step_id => ~"fp",
+        agent_id => agent_a,
+        turn => 1,
+        request => #{model => ~"m", messages => [#{role => user}]},
+        response => #{content => []},
+        usage => #{input_tokens => 1, output_tokens => 1},
+        inserted_at => erlang:system_time(millisecond)
+    }),
+
+    {ok, Script} = gakudan_llm_stub_script:start_link([{text, ~"go on"}]),
+    {ok, _Sup, ForkId} = gakudan:start_run(#{
+        agents => [agent_a_mod],
+        router => {gakudan_router_round_robin, #{}},
+        llm => {gakudan_llm_stub, #{script_owner => Script, api_key => ~"sk-caller-wins"}},
+        max_turns => 1,
+        fork_from => {SrcId, ~"fp"}
+    }),
+
+    %% The fork source's config carries no key; the caller's must survive.
+    {ok, {gakudan_llm_stub, Live}} = gakudan_registry:llm_spec(ForkId),
+    ~"sk-caller-wins" = maps:get(api_key, Live),
+
+    ok = gakudan:stop(ForkId),
+    gen_server:stop(Script).
+
+missing_credential_stops_the_run(Config) ->
+    Backend = proplists:get_value(backend, Config),
+    {ok, _Sup, RunId} = gakudan:start_run(#{
+        agents => [agent_a_mod],
+        router => {gakudan_router_round_robin, #{}},
+        llm => {no_credential_llm_mod, #{}},
+        max_turns => 4
+    }),
+    ok = gakudan:send(RunId, ~"go"),
+    ok = wait_until_gone(RunId, 5000),
+
+    {ok, Handle} = gakudan_checkpointer:init(gakudan_checkpointer_ets, Backend),
+    {ok, Snap} = gakudan_checkpointer:load_snapshot(Handle, RunId),
+    failed = maps:get(status, Snap),
+
+    %% and therefore the resumer will not pick it up again on the next boot
+    {ok, Active} = gakudan_checkpointer:list_active(Handle),
+    false = lists:any(fun(S) -> maps:get(run_id, S) =:= RunId end, Active).
 
 initial_messages_populate_blackboard(_Config) ->
     {ok, Script} = gakudan_llm_stub_script:start_link([{text, ~"ack"}]),

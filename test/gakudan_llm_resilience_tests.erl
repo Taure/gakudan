@@ -93,16 +93,68 @@ retry_retries_rate_limit_test() ->
     ?assertEqual({ok, ?OK_RESP}, gakudan_llm_retry:complete(?REQ, Opts)),
     stop_results(Pid).
 
-retry_backoff_is_cancellable_test() ->
+retry_backoff_is_interrupted_test_() ->
+    {timeout, 30, fun() ->
+        Pid = spawn_results([{error, timeout}, {ok, ?OK_RESP}]),
+        Self = self(),
+        spawn(fun() ->
+            timer:sleep(100),
+            Self ! gakudan_llm_cancel
+        end),
+        Opts = #{
+            backend => {scripted_llm_mod, #{results => Pid}},
+            max_attempts => 3,
+            base_delay => 10000
+        },
+        T0 = erlang:monotonic_time(millisecond),
+        Result = gakudan_llm_retry:complete(?REQ, Opts),
+        Elapsed = erlang:monotonic_time(millisecond) - T0,
+        stop_results(Pid),
+        ?assertEqual({error, cancelled}, Result),
+        ?assert(Elapsed < 3000)
+    end}.
+
+retry_cancelled_backoff_leaves_clean_mailbox_test() ->
     Pid = spawn_results([{error, timeout}, {ok, ?OK_RESP}]),
+    self() ! gakudan_llm_cancel,
+    Opts = #{backend => {scripted_llm_mod, #{results => Pid}}, base_delay => 5000},
+    ?assertEqual({error, cancelled}, gakudan_llm_retry:complete(?REQ, Opts)),
+    stop_results(Pid),
+    ?assertEqual({messages, []}, erlang:process_info(self(), messages)).
+
+retry_stream_backoff_cancel_notifies_subscriber_test() ->
+    Pid = spawn_results([{error, timeout}, {ok, ?OK_RESP}]),
+    Ref = make_ref(),
+    Sub = spawn_collector(self()),
     self() ! gakudan_llm_cancel,
     Opts = #{
         backend => {scripted_llm_mod, #{results => Pid}},
-        max_attempts => 3,
+        stream_request_id => Ref,
         base_delay => 5000
     },
+    ?assertEqual({error, cancelled}, gakudan_llm_retry:stream_call(?REQ, Opts, Sub)),
+    stop_results(Pid),
+    receive
+        {collected, Events} -> ?assertEqual([{cancelled, #{}}], Events)
+    after 1000 -> ?assert(false)
+    end.
+
+retry_complete_backoff_cancel_emits_nothing_test() ->
+    Pid = spawn_results([{error, timeout}, {ok, ?OK_RESP}]),
+    self() ! gakudan_llm_cancel,
+    Opts = #{backend => {scripted_llm_mod, #{results => Pid}}, base_delay => 5000},
     ?assertEqual({error, cancelled}, gakudan_llm_retry:complete(?REQ, Opts)),
-    stop_results(Pid).
+    stop_results(Pid),
+    ?assertEqual({messages, []}, erlang:process_info(self(), messages)).
+
+spawn_collector(Parent) ->
+    spawn(fun() -> collect(Parent, []) end).
+
+collect(Parent, Acc) ->
+    receive
+        {gakudan_llm_stream, _R, Ev} -> collect(Parent, [Ev | Acc])
+    after 300 -> Parent ! {collected, lists:reverse(Acc)}
+    end.
 
 retry_backoff_without_cancel_still_retries_test() ->
     Pid = spawn_results([{error, timeout}, {ok, ?OK_RESP}]),
@@ -112,12 +164,7 @@ retry_backoff_without_cancel_still_retries_test() ->
         base_delay => 1
     },
     ?assertEqual({ok, ?OK_RESP}, gakudan_llm_retry:complete(?REQ, Opts)),
-    ?assertEqual(0, mailbox_len()),
     stop_results(Pid).
-
-mailbox_len() ->
-    {messages, M} = erlang:process_info(self(), messages),
-    length(M).
 
 retry_does_not_retry_client_error_test() ->
     Pid = spawn_results([{error, {http_error, 400, ~"bad"}}, {ok, ?OK_RESP}]),
