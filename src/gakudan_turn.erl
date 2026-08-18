@@ -170,8 +170,11 @@ handle_structured(Ctx, Content, Usage) ->
         {ok, Value} ->
             case gakudan_structured:validate(Validator, Value) of
                 {ok, Validated} ->
+                    %% Keyed by agent: a fanout of N reviewers must yield N
+                    %% findings. A single fixed key meant the last writer won
+                    %% and the other N-1 were silently discarded.
                     ok = gakudan_blackboard:put(
-                        BB, structured_output, #{agent_id => AgentId, value => Validated}
+                        BB, {structured_output, AgentId}, Validated
                     ),
                     Body = iolist_to_binary(json:encode(Validated)),
                     {ok, _} = gakudan_blackboard:append(BB, {agent, AgentId}, Body),

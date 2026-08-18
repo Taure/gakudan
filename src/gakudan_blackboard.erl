@@ -13,6 +13,7 @@ Subscribers receive `{gakudan_blackboard, RunId, {entry_added, Entry}}` messages
     entries/1,
     put/3,
     get/2,
+    structured_outputs/1,
     subscribe/1,
     snapshot/1,
     restore/2
@@ -48,25 +49,36 @@ append(Pid, Role, Content) ->
 entries(Pid) ->
     gen_server:call(Pid, entries).
 
--spec put(pid(), atom(), term()) -> ok.
+-spec put(pid(), term(), term()) -> ok.
 put(Pid, Key, Value) ->
     gen_server:call(Pid, {put, Key, Value}).
 
--spec get(pid(), atom()) -> {ok, term()} | {error, not_found}.
+-spec get(pid(), term()) -> {ok, term()} | {error, not_found}.
 get(Pid, Key) ->
     gen_server:call(Pid, {get, Key}).
+
+-doc """
+Every agent's validated structured output, keyed by agent id.
+
+Each agent writes under `{structured_output, AgentId}`, so a fanout of N
+reviewers yields N entries rather than one survivor. Read through
+`gakudan:structured_outputs/1` rather than reaching in here.
+""".
+-spec structured_outputs(pid()) -> #{gakudan:agent_id() => term()}.
+structured_outputs(Pid) ->
+    gen_server:call(Pid, structured_outputs).
 
 -spec subscribe(pid()) -> {ok, reference()}.
 subscribe(Pid) ->
     gen_server:call(Pid, {subscribe, self()}).
 
 -doc "Capture current entries + kv for persistence.".
--spec snapshot(pid()) -> #{entries := [entry()], kv := #{atom() => term()}}.
+-spec snapshot(pid()) -> #{entries := [entry()], kv := #{term() => term()}}.
 snapshot(Pid) ->
     gen_server:call(Pid, snapshot).
 
 -doc "Replace the log + scratchpad with the given entries/kv (used on resume).".
--spec restore(pid(), #{entries := [entry()], kv := #{atom() => term()}}) -> ok.
+-spec restore(pid(), #{entries := [entry()], kv := #{term() => term()}}) -> ok.
 restore(Pid, #{entries := Entries, kv := Kv}) ->
     gen_server:call(Pid, {restore, Entries, Kv}).
 
@@ -101,6 +113,11 @@ handle_call({get, Key}, _From, State) ->
             [] -> {error, not_found}
         end,
     {reply, Reply, State};
+handle_call(structured_outputs, _From, State) ->
+    Pairs = ets:select(State#state.kv_tab, [
+        {{{structured_output, '$1'}, '$2'}, [], [{{'$1', '$2'}}]}
+    ]),
+    {reply, maps:from_list(Pairs), State};
 handle_call({subscribe, Pid}, _From, State) ->
     Ref = erlang:monitor(process, Pid),
     Subs = (State#state.subscribers)#{Ref => Pid},
