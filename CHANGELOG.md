@@ -78,11 +78,12 @@ and gakudan uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   crash reports or `sys:get_status`.** The run's real `llm` spec is held in
   `gakudan_registry` for the life of the run; the config that travels into
   `gakudan_runs_sup`, `gakudan_run_sup`'s child spec and every snapshot is a
-  redacted copy, and `#data` itself holds only redacted opts - the live spec
-  is fetched inside the turn worker at dispatch, so the credential never
-  enters gen_statem state and `sys:get_state/1`, which no `format_status/1`
-  can intercept, has nothing to return. Previously a supervisor
-  `child_terminated` or
+  redacted copy carrying a `credential_ref`; the real spec is stashed in
+  `gakudan_registry` under that reference and read once at `init/1`.
+  `gakudan_run_statem:format_status/1` redacts `llm_opts`, `config` and
+  `agents`, so `sys:get_status/1` and the gen_statem crash report are clean.
+  `sys:get_state/1` still returns the live credential - see ADR 0003 for why
+  that is accepted. Previously a supervisor `child_terminated` or
   `start_error` report - triggered by any crash, or a bad checkpointer spec -
   printed the whole config including `api_key` at ERROR level, and
   `sys:get_status/1` returned it to any process on the node.
@@ -93,11 +94,13 @@ and gakudan uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   provider errors separately and had drifted: HTTP 401 and 403 - a revoked or
   expired key, the common production case - were in neither, so a rejected
   key idled forever exactly like a missing one.
-- **The run's real LLM spec is held in `gakudan_registry`**, in a `private`
-  ETS table read through the owner, so no process can enumerate every live
-  run's credential. It survives a supervised restart (the run supervisor's
-  `'DOWN'` owns its lifetime, not the statem's `terminate/3`) and is cleared
-  if `start_run/1` fails or raises.
+- **The stash is keyed on an unforgeable reference**, in a `private` ETS table
+  read through the owner. It survives a supervised restart, is reaped when the
+  run supervisor dies, and is cleared if `start_run/1` fails - but only when no
+  run actually started, since `start_run/1` can raise on a `wait_ready` timeout
+  while the run is alive and healthy.
+- `gakudan_registry:stash_count/0` reports how many credentials the node holds.
+  It never returns one.
 - **A run with no usable LLM credential now fails instead of idling forever.**
   `{error, no_api_key}` used to be appended to the blackboard as transcript
   text, leaving the run `idle` - which `is_active/1` counts as live, so

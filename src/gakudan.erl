@@ -81,24 +81,41 @@ start_run(Config0) ->
     ok = warn_unserialisable(Config),
     with_stashed_spec(Config, fun gakudan_runs_sup:start_run/1).
 
-%% The vault entry is only ever cleared by the run's own teardown, so a start
-%% that never produces a run would strand the credential in ETS for the life of
-%% the node. Clear it on any non-{ok,...} outcome, including a raise.
-with_stashed_spec(#{run_id := RunId, llm := Spec} = Config, Continue) ->
-    ok = gakudan_registry:put_llm_spec(RunId, Spec),
-    try Continue(gakudan_checkpointer:redact_config(Config)) of
+%% The credential must not travel in the config: that config becomes the
+%% run_sup child spec's mfargs, which a supervisor crash report prints verbatim
+%% at ERROR level. So the real llm spec is stashed under a fresh reference and
+%% only the reference travels. A reference is unforgeable and unguessable, so
+%% unlike a caller-supplied run_id two concurrent callers cannot collide on one
+%% and end up reading each other's credential.
+with_stashed_spec(#{llm := Spec} = Config, Continue) ->
+    Ref = make_ref(),
+    ok = gakudan_registry:put_llm_spec(Ref, Spec),
+    Safe = (gakudan_checkpointer:redact_config(Config))#{credential_ref => Ref},
+    try Continue(Safe) of
         {ok, _, _} = Ok ->
             Ok;
         Other ->
-            ok = gakudan_registry:forget_llm_spec(RunId),
+            ok = forget_if_no_run(Ref, Config),
             Other
     catch
         Class:Reason:St ->
-            ok = gakudan_registry:forget_llm_spec(RunId),
+            ok = forget_if_no_run(Ref, Config),
             erlang:raise(Class, Reason, St)
     end;
 with_stashed_spec(Config, _Continue) ->
     {error, {missing_config_key, llm, maps:get(run_id, Config, undefined)}}.
+
+%% start_run/1 can fail AFTER the run is alive: gakudan_runs_sup waits on
+%% wait_ready with a timeout, so a slow snapshot load raises while the statem
+%% is running perfectly well. Forgetting the credential then would leave a live
+%% run silently authenticating from the environment, or tear it down as
+%% no_credentials and mark it failed, which the resumer excludes forever. Only
+%% reap when no run came out of the start.
+forget_if_no_run(Ref, #{run_id := RunId}) ->
+    case gakudan_registry:lookup(RunId) of
+        {error, not_found} -> gakudan_registry:forget_llm_spec(Ref);
+        {ok, _Entry} -> ok
+    end.
 
 fork_run(ForkPoint, Config) ->
     case resolve_checkpointer(Config) of

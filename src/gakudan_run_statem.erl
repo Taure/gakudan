@@ -8,6 +8,7 @@
 -export([start_link/2, start_link/3, send/2, status/1, stop/1, await/2, wait_ready/1]).
 -export([interrupt/2, resume/2, cancel/1]).
 -export([callback_mode/0, init/1, handle_event/4, terminate/3]).
+-export([format_status/1]).
 
 -record(data, {
     run_id :: gakudan:run_id(),
@@ -93,7 +94,7 @@ callback_mode() ->
 init({fresh, RunSup, Config}) ->
     process_flag(trap_exit, true),
     #{run_id := RunId, agents := AgentsRaw, router := {RMod, ROpts}} = Config,
-    {LMod, LOpts} = live_llm_spec(RunId, Config),
+    {LMod, LOpts} = live_llm_spec(Config),
     MaxTurns = maps:get(max_turns, Config, 16),
     Agents = build_agents_map(AgentsRaw),
     AgentIds = [agent_id(S) || S <- AgentsRaw],
@@ -110,8 +111,8 @@ init({fresh, RunSup, Config}) ->
         router_mod = RMod,
         router_state = RouterState,
         llm_mod = LMod,
-        llm_opts = gakudan_checkpointer:redact_opts(LOpts),
-        credential_source = credential_source(RunId),
+        llm_opts = LOpts,
+        credential_source = credential_source(Config),
         max_turns = MaxTurns,
         checkpointer = Checkpointer,
         audit = init_audit(Config),
@@ -124,7 +125,7 @@ init({fresh, RunSup, Config}) ->
 init({resume, RunSup, Config, Snapshot}) ->
     process_flag(trap_exit, true),
     #{run_id := RunId, agents := AgentsRaw, router := {RMod, _ROpts}} = Config,
-    {LMod, LOpts} = live_llm_spec(RunId, Config),
+    {LMod, LOpts} = live_llm_spec(Config),
     MaxTurns = maps:get(max_turns, Config, 16),
     Agents = build_agents_map(AgentsRaw),
     AgentIds = [agent_id(S) || S <- AgentsRaw],
@@ -146,8 +147,8 @@ init({resume, RunSup, Config, Snapshot}) ->
         router_mod = RMod,
         router_state = RouterState,
         llm_mod = LMod,
-        llm_opts = gakudan_checkpointer:redact_opts(LOpts),
-        credential_source = credential_source(RunId),
+        llm_opts = LOpts,
+        credential_source = credential_source(Config),
         max_turns = MaxTurns,
         turn = Turn,
         last_step = LastStep,
@@ -422,7 +423,7 @@ spawn_worker(AgentId, TurnNumber, Data) ->
         run_id = RunId,
         agents = Agents,
         llm_mod = LMod,
-        llm_opts = StoredOpts,
+        llm_opts = LOpts,
         blackboard = BB,
         stream = Stream,
         checkpointer = Checkpointer,
@@ -436,13 +437,6 @@ spawn_worker(AgentId, TurnNumber, Data) ->
     StartTime = erlang:monotonic_time(),
     emit_turn_start(RunId, AgentId, TurnNumber),
     {Pid, MonRef} = spawn_monitor(fun() ->
-        %% Resolved HERE, not in the statem: the registry read is a
-        %% gen_server:call, so doing it in handle_event/4 lets a stalled
-        %% registry take down the statem and, under one_for_all, the whole
-        %% run. In the worker a stall fails one turn, which turn_failed and
-        %% 'DOWN' already handle. It also keeps the credential off the
-        %% statem's heap entirely rather than merely out of its state.
-        LOpts = live_llm_opts(RunId, StoredOpts),
         try
             case
                 gakudan_turn:run(
@@ -524,6 +518,7 @@ agent_id({Mod, _Opts}) -> Mod:id().
 register_children(Data) ->
     Blackboard = find_child(Data#data.run_sup, blackboard),
     Stream = find_child(Data#data.run_sup, stream),
+    _ = bind_credential(Data),
     ok = gakudan_registry:register(
         Data#data.run_id, Data#data.run_sup, self(), Blackboard, Stream
     ),
@@ -775,10 +770,44 @@ save_snapshot(Status, #data{checkpointer = Handle} = Data) ->
     end,
     ok.
 
-live_llm_spec(RunId, Config) ->
-    case gakudan_registry:llm_spec(RunId) of
-        {ok, Spec} -> Spec;
-        {error, not_found} -> maps:get(llm, Config)
+%% Read once, here, rather than per dispatch: a per-turn registry call makes
+%% every turn depend on one gen_server, and a stall then kills the statem. The
+%% credential lives in #data from now on - process-local, so no other run can
+%% read it and no caller-supplied key can collide with it. format_status/1
+%% keeps it out of crash reports and sys:get_status.
+-doc false.
+format_status(#{data := #data{} = D} = Status) ->
+    Status#{
+        data => D#data{
+            llm_opts = gakudan_checkpointer:redact_opts(D#data.llm_opts),
+            config = gakudan_checkpointer:redact_config(D#data.config),
+            agents = redact_agents(D#data.agents)
+        }
+    };
+format_status(Status) ->
+    Status.
+
+redact_agents(Agents) ->
+    maps:map(
+        fun(_Id, {Mod, Opts}) -> {Mod, gakudan_checkpointer:redact_opts(Opts)} end,
+        Agents
+    ).
+
+bind_credential(#data{run_sup = RunSup, config = Config}) ->
+    case maps:get(credential_ref, Config, undefined) of
+        undefined -> ok;
+        Ref -> gakudan_registry:bind_llm_spec(Ref, RunSup)
+    end.
+
+live_llm_spec(Config) ->
+    case maps:get(credential_ref, Config, undefined) of
+        undefined ->
+            maps:get(llm, Config);
+        Ref ->
+            case gakudan_registry:llm_spec(Ref) of
+                {ok, Spec} -> Spec;
+                {error, not_found} -> maps:get(llm, Config)
+            end
     end.
 
 %% #data holds only redacted opts. The credential is fetched per dispatch so it
@@ -786,22 +815,16 @@ live_llm_spec(RunId, Config) ->
 %% that sys:get_state/1 would hand to any process on the node. A vault miss is
 %% the legitimate unattended-resume path: fall back and let the backend resolve
 %% from the environment.
-%% Reported once per run rather than logged per turn: every unattended-resumed
-%% run legitimately misses the vault (gakudan_runs_resumer and
-%% gakudan_lease_server call resume_run/2 directly), so a per-turn line would
-%% fire on every turn of every resumed run. An atom in run-start telemetry
-%% answers "which of my runs are authenticating from the environment" without
-%% the noise, and never carries the credential itself.
-credential_source(RunId) ->
-    case gakudan_registry:llm_spec(RunId) of
-        {ok, _} -> vault;
-        {error, not_found} -> environment
+credential_source(Config) ->
+    case maps:get(credential_ref, Config, undefined) of
+        undefined -> environment;
+        Ref -> stash_state(Ref)
     end.
 
-live_llm_opts(RunId, StoredOpts) ->
-    case gakudan_registry:llm_spec(RunId) of
-        {ok, {_Mod, Opts}} -> Opts;
-        {error, not_found} -> StoredOpts
+stash_state(Ref) ->
+    case gakudan_registry:llm_spec(Ref) of
+        {ok, _} -> caller;
+        {error, not_found} -> environment
     end.
 
 maybe_add_lease(Snapshot) ->

@@ -35,7 +35,8 @@ Two collections live in this contract:
     renew_leases/4,
     release_run/3,
     redact_config/1,
-    redact_opts/1
+    redact_opts/1,
+    redact_nested/1
 ]).
 
 -export_type([
@@ -170,6 +171,8 @@ redact_snapshot(Snapshot) ->
 
 redact_spec({Mod, Opts}) when is_map(Opts) ->
     {Mod, redact_opts(Opts)};
+redact_spec({Mod, Opts}) when is_list(Opts) ->
+    {Mod, redact_nested(Opts)};
 redact_spec(Spec) ->
     Spec.
 
@@ -178,14 +181,23 @@ redact_spec(Spec) ->
 redact_opts(Opts) ->
     maps:map(fun(_K, V) -> redact_nested(V) end, maps:without(?SECRET_LLM_OPTS, Opts)).
 
+-doc "Strip credential-bearing keys from any term, at any depth.".
+-spec redact_nested(term()) -> term().
 redact_nested({Mod, Inner}) when is_atom(Mod), is_map(Inner) ->
     redact_spec({Mod, Inner});
 redact_nested(M) when is_map(M) ->
-    maps:map(fun(_K, V) -> redact_nested(V) end, M);
+    %% strip AT this level too, not only in nested values
+    maps:map(fun(_K, V) -> redact_nested(V) end, maps:without(?SECRET_LLM_OPTS, M));
 redact_nested(T) when is_tuple(T) ->
     list_to_tuple([redact_nested(E) || E <- tuple_to_list(T)]);
 redact_nested(L) when is_list(L) ->
-    [redact_nested(E) || E <- L];
+    %% An improper tail must not raise out of a snapshot write mid-run; a
+    %% pathological shape is better left alone than crashing the statem.
+    try
+        [redact_nested(E) || E <- L]
+    catch
+        error:_ -> L
+    end;
 redact_nested(V) ->
     V.
 
