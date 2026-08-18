@@ -46,9 +46,13 @@ jobs:
           cd consumer
           # No project_plugins. No kura. Nothing but the dependency, exactly as
           # a stranger reading the README would write it.
+          # Pin by SHA, not branch: actions/checkout leaves a PR in detached
+          # HEAD at refs/remotes/pull/N/merge, so no local branch of that name
+          # exists to clone from.
+          SHA="$(git -C "${GITHUB_WORKSPACE}/gakudan" rev-parse HEAD)"
           cat > rebar.config <<EOF
           {erl_opts, [debug_info]}.
-          {deps, [{gakudan, {git, "file://${GITHUB_WORKSPACE}/gakudan", {branch, "${GITHUB_HEAD_REF:-${GITHUB_REF_NAME}}"}}}]}.
+          {deps, [{gakudan, {git, "file://${GITHUB_WORKSPACE}/gakudan", {ref, "${SHA}"}}}]}.
           EOF
           rebar3 compile
 
