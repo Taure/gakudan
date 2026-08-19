@@ -432,7 +432,7 @@ spawn_worker(AgentId, TurnNumber, Data) ->
         actor = Actor,
         context = Context
     } = Data,
-    {AgentMod, _AgentOpts} = maps:get(AgentId, Agents),
+    {AgentMod, AgentOpts} = maps:get(AgentId, Agents),
     Self = self(),
     StartTime = erlang:monotonic_time(),
     emit_turn_start(RunId, AgentId, TurnNumber),
@@ -450,7 +450,12 @@ spawn_worker(AgentId, TurnNumber, Data) ->
                     BB,
                     Stream,
                     Guardrails,
-                    #{audit => Audit, actor => Actor, context => Context}
+                    #{
+                        audit => Audit,
+                        actor => Actor,
+                        context => Context,
+                        agent_opts => AgentOpts
+                    }
                 )
             of
                 {ok, Usage} -> Self ! {turn_done, self(), Usage};
