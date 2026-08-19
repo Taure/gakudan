@@ -159,8 +159,14 @@ The backends re-resolve these from the environment when absent, so a resumed
 run still authenticates. See [ADR 0003](docs/adr/0003-checkpointer-behaviour.md).
 """.
 -spec redact_config(map()) -> map().
-redact_config(#{llm := Spec} = Config) ->
-    Config#{llm => redact_spec(Spec)};
+redact_config(Config) when is_map(Config) ->
+    %% Total, not llm-only. The previous version walked the `llm` key alone, so
+    %% a credential under any other key - guardrails, audit, agents, routers, a
+    %% memory ref carrying an embedder API key - was persisted verbatim. That is
+    %% the PR #66 defect re-created under every future key. redact_nested/1 is
+    %% already total over maps, tuples and lists, so applying it to the whole
+    %% config covers keys nobody has invented yet.
+    redact_nested(Config);
 redact_config(Config) ->
     Config.
 
@@ -169,12 +175,11 @@ redact_snapshot(#{config := Config} = Snapshot) ->
 redact_snapshot(Snapshot) ->
     Snapshot.
 
+%% Only reached from redact_nested/1, which matches {atom(), map()} first, so
+%% the previous list and catch-all clauses became unreachable when
+%% redact_config/1 stopped special-casing the llm key.
 redact_spec({Mod, Opts}) when is_map(Opts) ->
-    {Mod, redact_opts(Opts)};
-redact_spec({Mod, Opts}) when is_list(Opts) ->
-    {Mod, redact_nested(Opts)};
-redact_spec(Spec) ->
-    Spec.
+    {Mod, redact_opts(Opts)}.
 
 -doc "Strip credential-bearing keys from one LLM opts map, recursively.".
 -spec redact_opts(map()) -> map().

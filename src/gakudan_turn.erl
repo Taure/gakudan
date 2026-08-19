@@ -9,7 +9,8 @@
 -type audit_ctx() :: #{
     audit => gakudan_audit:handle(),
     actor => map(),
-    context => undefined | gakudan_context:ref()
+    context => undefined | gakudan_context:ref(),
+    agent_opts => map()
 }.
 -type usage() :: #{
     tokens_in := non_neg_integer(),
@@ -74,7 +75,8 @@ run(
     AuditCtx
 ) ->
     System = AgentMod:system_prompt(),
-    ResolvedTools = gakudan_tool:resolve(AgentMod:tools()),
+    AgentOpts = maps:get(agent_opts, AuditCtx, #{}),
+    ResolvedTools = gakudan_tool:resolve(gakudan_agent:tools(AgentMod, AgentOpts)),
     Specs = [maps:get(spec, R) || R <- ResolvedTools],
     Model = AgentMod:model(),
     RequestOptions = gakudan_agent:request_options(AgentMod),

@@ -19,6 +19,7 @@
     raising_start_does_not_leak_the_credential/1,
     slow_start_keeps_a_live_runs_credential/1,
     nested_map_credential_is_redacted/1,
+    credential_under_a_non_llm_key_is_redacted/1,
     live_credential_reaches_the_backend/1,
     stalled_registry_does_not_kill_the_run/1,
     composed_credential_absent_from_status/1,
@@ -48,6 +49,7 @@ all() ->
         raising_start_does_not_leak_the_credential,
         slow_start_keeps_a_live_runs_credential,
         nested_map_credential_is_redacted,
+        credential_under_a_non_llm_key_is_redacted,
         live_credential_reaches_the_backend,
         stalled_registry_does_not_kill_the_run,
         composed_credential_absent_from_status,
@@ -427,6 +429,30 @@ nested_map_credential_is_redacted(Config) ->
         %% not a nested SPEC - a plain map value, the shape a consumer's own
         %% composed backend uses and the shape the docstring promises to cover
         llm => {gakudan_llm_stub, #{script_owner => Script, auth => #{api_key => Key}}},
+        max_turns => 1
+    }),
+    ok = gakudan:send(RunId, ~"go"),
+    {ok, _} = gakudan:await(RunId, 5000),
+
+    {ok, Handle} = gakudan_checkpointer:init(gakudan_checkpointer_ets, Backend),
+    {ok, Snapshot} = gakudan_checkpointer:load_snapshot(Handle, RunId),
+    ?assertEqual(nomatch, binary:match(term_to_binary(Snapshot), Key)),
+
+    ok = gakudan:stop(RunId),
+    gen_server:stop(Script).
+
+credential_under_a_non_llm_key_is_redacted(Config) ->
+    Backend = proplists:get_value(backend, Config),
+    Key = ~"sk-under-a-non-llm-key",
+    {ok, Script} = gakudan_llm_stub_script:start_link([{text, ~"ack"}]),
+    {ok, _Sup, RunId} = gakudan:start_run(#{
+        agents => [agent_a_mod],
+        router => {gakudan_router_round_robin, #{}},
+        llm => {gakudan_llm_stub, #{script_owner => Script}},
+        %% Not the llm key: a guardrail spec carrying a credential. Anything
+        %% under any key must be stripped, or every future config key
+        %% re-creates the PR #66 defect.
+        guardrails => [{some_guardrail_mod, #{api_key => Key}}],
         max_turns => 1
     }),
     ok = gakudan:send(RunId, ~"go"),

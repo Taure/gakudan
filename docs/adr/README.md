@@ -42,3 +42,4 @@ with a new one.
 | [0021](0021-fork-from-checkpoint.md) | Fork from checkpoint |
 | [0022](0022-loop-and-auto-routers.md) | Loop and auto (LLM-select) routers |
 | [0023](0023-run-leasing.md) | Run leasing for horizontal scale-out |
+| [0024](0024-per-run-agent-options.md) | Per-run agent options, and total config redaction |
