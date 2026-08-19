@@ -172,7 +172,7 @@ case for a future sister lib; it is not needed for the default.
 
 **Positive.**
 
-- A durable, queryable, tamper-evident record keyed by run and attributable to
+- A durable, queryable, integrity-checked record keyed by run and attributable to
   an actor/tenant - the concrete adoption gate for regulated operators.
 - The seam is pluggable and optional, exactly like the checkpointer, llm
   backend, and guardrails. Zero cost when no sink is configured.

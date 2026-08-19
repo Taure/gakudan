@@ -22,9 +22,11 @@ gakudan:send(RunId, ~"Build a small TCP echo server in Erlang."),
 
 -export([start_run/1, send/2, status/1, stop/1, await/2, interrupt/2, resume/2, cancel/1]).
 -export([subscribe_stream/1, unsubscribe_stream/2]).
+-export([structured_outputs/1]).
 
 -export_type([
     run_id/0,
+    agent_id/0,
     run_config/0,
     agent_spec/0,
     router_spec/0,
@@ -37,6 +39,9 @@ gakudan:send(RunId, ~"Build a small TCP echo server in Erlang."),
 ]).
 
 -type run_id() :: binary().
+-doc "How an agent identifies itself: its module name.".
+-type agent_id() :: atom().
+
 -type agent_spec() :: module() | {module(), Opts :: map()}.
 -type router_spec() :: {module(), Opts :: map()}.
 -type llm_spec() :: {module(), Opts :: map()}.
@@ -187,6 +192,28 @@ send(RunId, Message) when is_binary(RunId), is_binary(Message) ->
 -spec status(run_id()) -> {ok, atom()} | {error, not_found}.
 status(RunId) ->
     gakudan_run:status(RunId).
+
+-doc """
+Every agent's validated structured output for a run, keyed by agent id.
+
+This is how you read the result of a fanout review swarm: give each reviewer a
+`response_format` in its `request_options/0`, run them under
+`m:gakudan_router_fanout`, and collect the findings here.
+
+```erlang
+{ok, Findings} = gakudan:structured_outputs(RunId),
+%% #{security_reviewer => #{~"severity" => ~"high", ...},
+%%   perf_reviewer     => #{~"severity" => ~"low",  ...}}
+```
+
+Agents that produced no structured output are simply absent.
+""".
+-spec structured_outputs(run_id()) -> {ok, #{agent_id() => term()}} | {error, not_found}.
+structured_outputs(RunId) ->
+    case gakudan_run:blackboard(RunId) of
+        {ok, BB} -> {ok, gakudan_blackboard:structured_outputs(BB)};
+        {error, _} = Err -> Err
+    end.
 
 -doc "Stop a run (terminates its supervisor and all child agents).".
 -spec stop(run_id()) -> ok | {error, not_found}.

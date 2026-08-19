@@ -7,13 +7,25 @@ is one append-only row in the `gakudan_audit` table. `actor.id` and
 `actor.tenant` are lifted into their own columns for direct querying; the
 full event is stored as a `term_to_binary` blob.
 
-Rows are **hash-chained per run** for tamper-evidence: `event_hash` is the
-SHA-256 of the deterministically-encoded event (detects row edits), and
-`row_hash = sha256(prev_hash <> event_hash)` links each row to the previous
-one in the run, so an edited, deleted, or mid-chain-inserted row breaks the
-chain. (A row forged onto the *tail* after the last legitimate one has no
-successor to expose it; detecting that needs an external length/tail anchor,
-which this sink does not keep.) Writes run
+Rows are **hash-chained per run**: `event_hash` is the SHA-256 of the
+deterministically-encoded event, and `row_hash = sha256(prev_hash <>
+event_hash)` links each row to the previous one, so a *careless* edit,
+deletion or mid-chain insert breaks the chain.
+
+> ### What this does NOT detect
+>
+> The chain is **unkeyed**, and both hashes live in the table they protect.
+> An attacker with UPDATE on `gakudan_audit` can edit any row and recompute
+> every hash forward; `verify/2` then returns `ok` on the rewritten history.
+> This detects accidental corruption and casual tampering. It does **not**
+> detect a competent attacker with write access, which is the adversary a
+> tamper-evident log exists to catch. Treat it as an integrity checksum, not
+> as tamper-evidence.
+>
+> Closing this needs an HMAC keyed with a secret the database does not hold,
+> plus an external anchor for the chain tail. Tracked in issue #68.
+
+Writes run
 inside a transaction that locks the run's latest row (`FOR UPDATE`), so a
 fanout's concurrent guardrail events chain in a well-defined order; the
 genesis event (`run_started`) is always written first by the run statem, so

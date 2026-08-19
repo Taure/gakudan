@@ -1,0 +1,74 @@
+name: Cold install
+
+# Can a stranger use this?
+#
+# gakudan shipped a top-level `provider_hooks` entry for two months. It
+# propagates into every consumer's build and calls a provider that only exists
+# if the consumer independently adds rebar3_kura to their own project_plugins.
+# A fresh project depending on gakudan therefore aborted with
+# {badrecord,not_found}, naming neither kura nor the plugin.
+#
+# Every other job in CI builds gakudan from inside its own checkout, where the
+# plugin is present, so all of them stayed green throughout. This job is the
+# only one that can see the failure: it builds a project that is not gakudan.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '23 5 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cold-install:
+    name: Fresh consumer can depend on gakudan
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+          path: gakudan
+
+      - uses: erlef/setup-beam@5304e04ea2b355f03681464e683d92e3b2f18451 # v1
+        with:
+          version-file: gakudan/.tool-versions
+          version-type: strict
+
+      - name: Build a project that is not gakudan
+        run: |
+          set -euo pipefail
+          rebar3 new app consumer
+          cd consumer
+          # No project_plugins. No kura. Nothing but the dependency, exactly as
+          # a stranger reading the README would write it.
+          # Pin by SHA, not branch: actions/checkout leaves a PR in detached
+          # HEAD at refs/remotes/pull/N/merge, so no local branch of that name
+          # exists to clone from.
+          SHA="$(git -C "${GITHUB_WORKSPACE}/gakudan" rev-parse HEAD)"
+          cat > rebar.config <<EOF
+          {erl_opts, [debug_info]}.
+          {deps, [{gakudan, {git, "file://${GITHUB_WORKSPACE}/gakudan", {ref, "${SHA}"}}}]}.
+          EOF
+          rebar3 compile
+
+      - name: And it boots
+        run: |
+          set -euo pipefail
+          cd consumer
+          # erl directly, not `rebar3 shell --eval`: the latter swallows output
+          # and exits 0 regardless, so it would pass even if the boot failed.
+          erl -noshell -pa _build/default/lib/*/ebin -eval '
+            case application:ensure_all_started(gakudan) of
+              {ok, _} ->
+                case is_pid(whereis(gakudan_sup)) of
+                  true  -> io:format("gakudan booted in a foreign application~n"), halt(0);
+                  false -> io:format("supervisor not running~n"), halt(1)
+                end;
+              Err ->
+                io:format("start failed: ~p~n", [Err]), halt(1)
+            end.'
